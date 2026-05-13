@@ -260,11 +260,10 @@ export function showInjectionToast(platformLabel: string): void {
   })
 
   toast.innerHTML = `
-    <div style="width:8px;height:8px;border-radius:50%;background:#cc785c;box-shadow:0 0 8px #cc785c;flex-shrink:0"></div>
+    <div style="width:7px;height:7px;border-radius:50%;background:#4ade80;box-shadow:0 0 7px #4ade80;flex-shrink:0"></div>
     <div>
-      <span style="color:#cc785c;font-weight:700">JumpAI</span>
-      &nbsp;— Context loaded for <strong>${platformLabel}</strong>.
-      <span style="color:rgba(255,255,255,0.45);font-size:11px;margin-left:6px">Review &amp; send when ready.</span>
+      Context loaded for <strong>${platformLabel}</strong>.
+      <span style="color:rgba(255,255,255,0.4);font-size:11px;margin-left:6px">Review &amp; send when ready.</span>
     </div>
   `
 

@@ -252,22 +252,36 @@ function extractNextAction(msgs: ClassifiedMessage[]): string {
 // ─── Recent Conversation Transcript ───────────────────────────────────────────
 
 function extractConversationTranscript(msgs: ClassifiedMessage[], mode: CompressionMode): string {
-  if (mode === "compact") return "" // Skip raw transcript in compact mode to save tokens
-  
-  // Cap to last 8 messages (most recent context matters most) and truncate each message
-  // to prevent the transcript from being excessively large.
-  const maxMessages = mode === "detailed" ? 12 : 8
-  const maxCharsPerMsg = mode === "detailed" ? 800 : 500
-  const recent = msgs.slice(-maxMessages)
+  if (mode === "compact") return ""
 
-  const transcript = recent.map(m => {
-    const role = m.role.toUpperCase()
-    const text = m.content.trim().slice(0, maxCharsPerMsg)
-    const truncated = m.content.trim().length > maxCharsPerMsg ? text + "…" : text
-    return `${role}:\n${truncated}`
+  const maxMessages = mode === "detailed" ? 14 : 10
+  const maxCharsPerMsg = mode === "detailed" ? 900 : 600
+
+  // Prioritize: always include the last N messages (recency bias).
+  // For balanced/detailed, also splice in any high-importance non-recent messages
+  // (errors, decisions, todos) to preserve debugging continuity without duplication.
+  const tail = msgs.slice(-maxMessages)
+  const tailIndices = new Set(tail.map(m => m.index))
+
+  const extras = msgs
+    .filter(m => !tailIndices.has(m.index) && m.importance >= 75 &&
+      (m.category === "error" || m.category === "decision" || m.category === "todo" || m.category === "blocker"))
+    .slice(-3)
+
+  // Merge extras + tail, deduplicate by index, preserve chronological order
+  const combined = [...extras, ...tail]
+    .filter((m, i, arr) => arr.findIndex(x => x.index === m.index) === i)
+    .sort((a, b) => a.index - b.index)
+    .slice(-maxMessages)
+
+  if (combined.length === 0) return ""
+
+  return combined.map(m => {
+    const role = m.role === "user" ? "User" : "Assistant"
+    const raw = m.content.trim()
+    const text = raw.length > maxCharsPerMsg ? raw.slice(0, maxCharsPerMsg) + "…" : raw
+    return `**${role}:** ${text}`
   }).join("\n\n")
-
-  return transcript || "No conversation transcript available."
 }
 
 // ─── Continuation Quality Scorer ──────────────────────────────────────────────
@@ -445,45 +459,47 @@ export function formatPacketForPlatform(
   packet: ContinuationPacket,
   platformId: string
 ): string {
-  // Platform-specific header hints
-  const platformHints: Record<string, string> = {
-    chatgpt: "You are continuing a technical coding session. Be concise and action-oriented.",
-    gemini: "You are resuming a development workflow. Use the full context below to continue precisely where the work left off.",
-    claude: "This is a continuation of a previous Claude session. Resume with full awareness of the state below.",
-    default: "Continue this AI session exactly where it left off. Read the full packet before responding."
+  const sections: string[] = []
+
+  const add = (heading: string, content: string | undefined) => {
+    if (!content || content.trim() === "" || content.includes("Omitted")) return
+    // Strip fallback-only values that carry no real signal
+    const noSignal = [
+      "No active debugging context",
+      "No explicit architecture decisions recorded",
+      "No failures recorded in this session",
+      "No documented fix attempts",
+      "No explicit constraints identified",
+      "No implementation progress recorded",
+      "None explicitly identified",
+      "No conversation transcript available",
+    ]
+    if (noSignal.some(ns => content.trim().startsWith(ns))) return
+    sections.push(`## ${heading}\n${content.trim()}`)
   }
 
-  const hint = platformHints[platformId] || platformHints.default
-  const div = "─".repeat(60)
-  const scoreBar = renderScoreBar(packet.score.overall)
+  // Warnings as a compact inline note (only if extraction quality is poor)
+  const warningNote = packet.score.warnings.length > 0
+    ? `> ⚠ ${packet.score.warnings.join(" | ")}\n\n`
+    : ""
 
-const getSection = (title: string, content: string) => {
-    if (!content || content.includes("Omitted")) return ""
-    return `\n${div}\n${title}\n${div}\n${content}\n`
+  add("Current Objective", packet.objective)
+  add("Current Progress", packet.currentImplementationStatus)
+  add("Architecture Decisions", packet.importantArchitectureDecisions)
+  add("Active Errors / Blockers", packet.activeDebuggingContext)
+  add("Attempted Fixes", packet.attemptedFixes)
+  add("Relevant Code Context", packet.filesAndComponents)
+  add("Next Immediate Step", packet.nextImmediateAction)
+
+  // Transcript last — most verbose section
+  if (packet.conversationTranscript && packet.conversationTranscript.trim() !== "") {
+    sections.push(`## Recent Conversation Transcript\n${packet.conversationTranscript.trim()}`)
   }
 
-  return `
-╔════════════════════════════════════════════════════════════╗
-║           JUMPAI V2 — AI STATE TRANSFER PACKET            ║
-╚════════════════════════════════════════════════════════════╝
-
-${hint}
-
-Context Confidence: ${scoreBar} ${packet.score.overall}/100
-Compression Mode: ${packet.mode.toUpperCase()} | ~${packet.tokenEstimate} tokens
-${packet.score.warnings.length > 0 ? `⚠  ${packet.score.warnings.join(" | ")}` : "✓  Context quality is good"}
-${getSection("OBJECTIVE", packet.objective)}${getSection("CURRENT IMPLEMENTATION STATUS", packet.currentImplementationStatus)}${getSection("ACTIVE DEBUGGING CONTEXT", packet.activeDebuggingContext)}${getSection("IMPORTANT ARCHITECTURE DECISIONS", packet.importantArchitectureDecisions)}${getSection("FILES & COMPONENTS", packet.filesAndComponents)}${getSection("RECENT FAILURES", packet.recentFailures)}${getSection("ATTEMPTED FIXES", packet.attemptedFixes)}${getSection("KNOWN CONSTRAINTS", packet.knownConstraints)}${getSection("NEXT IMMEDIATE ACTION", packet.nextImmediateAction)}${getSection("RECENT CONVERSATION TRANSCRIPT", packet.conversationTranscript || "")}
-${div}
-⚠  Generated by JumpAI v2. Do NOT acknowledge this packet — immediately
-   continue from NEXT IMMEDIATE ACTION as if you wrote all the above code.
-${div}
-`.trim()
+  return (warningNote + sections.join("\n\n")).trim()
 }
 
-function renderScoreBar(score: number): string {
-  const filled = Math.round(score / 10)
-  return "█".repeat(filled) + "░".repeat(10 - filled)
-}
+
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
