@@ -63,19 +63,24 @@ function isRecoveryNoise(text: string): boolean {
   return false
 }
 
+const UI_CHROME_RE = /^(Copy|Edit|Retry|Regenerate|Like|Dislike|Share|Export|Help|Feedback|Publish|Artifacts?|Preview|Run|Download|Code)\s*$/gim
+const SEPARATOR_RE = /^\s*[-–—]{3,}\s*$/gm
+
 function filterMessages(messages: RawMessage[]): RawMessage[] {
-  return messages
-    .filter(m => !isRecoveryNoise(m.content))
-    .map(m => ({
-      ...m,
-      // Strip common UI chrome from content before processing
-      content: m.content
-        .replace(/^(Copy|Edit|Retry|Regenerate|Like|Dislike|Share|Export|Help|Feedback|Publish)\s*$/gim, "")
-        .replace(/^(Artifacts?|Preview|Run|Download|Code)\s*$/gim, "")
-        .replace(/^\s*[-–—]{3,}\s*$/gm, "")
-        .trim()
-    }))
-    .filter(m => m.content.length > 5)
+  const clean: RawMessage[] = []
+  for (const m of messages) {
+    if (isRecoveryNoise(m.content)) continue
+    
+    const content = m.content
+      .replace(UI_CHROME_RE, "")
+      .replace(SEPARATOR_RE, "")
+      .trim()
+      
+    if (content.length > 5) {
+      clean.push({ ...m, content })
+    }
+  }
+  return clean
 }
 
 // ─── Public Types ─────────────────────────────────────────────────────────────
