@@ -422,14 +422,15 @@ function detectIncompleteItems(messages: RawMessage[]): IncompleteItem[] {
 // ─── ARCHITECTURE DECISION EXTRACTION ────────────────────────────────────────
 
 const ARCH_PATTERNS: Array<{ re: RegExp; category: ArchitectureDecision["category"] }> = [
-  { re: /(?:using|using\s+the|built\s+with|we(?:'re|re)\s+using)\s+(?:Next\.?js|Nuxt|Remix|Astro|Vite|Create\s+React\s+App|SvelteKit)\b.{0,150}/gi, category: "framework" },
-  { re: /(?:using|using\s+the|built\s+with)\s+(?:React|Vue|Angular|Svelte|Solid(?:JS)?)\b.{0,100}/gi, category: "framework" },
-  { re: /(?:using|with)\s+(?:Prisma|Drizzle|TypeORM|Mongoose|Sequelize)\b.{0,100}/gi, category: "database" },
-  { re: /(?:using|with)\s+(?:Supabase|PlanetScale|Neon|Firebase|MongoDB|PostgreSQL|MySQL|SQLite)\b.{0,100}/gi, category: "database" },
-  { re: /(?:using|with)\s+(?:NextAuth|Auth\.?js|Clerk|Lucia|Passport\.?js)\b.{0,100}/gi, category: "auth" },
-  { re: /(?:using|with)\s+(?:JWT|session\s+cookies|OAuth)\b.{0,100}/gi, category: "auth" },
-  { re: /(?:using|with)\s+(?:Zustand|Redux|Jotai|Recoil|Context\s+API|Valtio|Nanostores)\b.{0,100}/gi, category: "state" },
-  { re: /(?:deploying|hosted\s+on|deployed\s+to)\s+(?:Vercel|Netlify|Railway|Fly\.io|AWS|GCP|Azure)\b.{0,100}/gi, category: "deployment" },
+  { re: /(?:using|using\s+the|built\s+with|we(?:'re|re)\s+using)\s+(?:Next\.?js|Nuxt|Remix|Astro|Vite|Create\s+React\s+App|SvelteKit|Qwik|SolidStart)\b.{0,150}/gi, category: "framework" },
+  { re: /(?:using|using\s+the|built\s+with)\s+(?:React|Vue|Angular|Svelte|Solid(?:JS)?|Preact|Alpine(?:JS)?)\b.{0,100}/gi, category: "framework" },
+  { re: /(?:using|with)\s+(?:Prisma|Drizzle|TypeORM|Mongoose|Sequelize|Kysely|MikroORM)\b.{0,100}/gi, category: "database" },
+  { re: /(?:using|with)\s+(?:Supabase|PlanetScale|Neon|Firebase|MongoDB|PostgreSQL|MySQL|SQLite|Redis|Upstash|Turso)\b.{0,100}/gi, category: "database" },
+  { re: /(?:using|with)\s+(?:NextAuth|Auth\.?js|Clerk|Lucia|Passport\.?js|Auth0|Kinde)\b.{0,100}/gi, category: "auth" },
+  { re: /(?:using|with)\s+(?:JWT|session\s+cookies|OAuth|Magic\s+links)\b.{0,100}/gi, category: "auth" },
+  { re: /(?:using|with)\s+(?:Zustand|Redux|Jotai|Recoil|Context\s+API|Valtio|Nanostores|XState|Signals)\b.{0,100}/gi, category: "state" },
+  { re: /(?:deploying|hosted\s+on|deployed\s+to)\s+(?:Vercel|Netlify|Railway|Fly\.io|AWS|GCP|Azure|Cloudflare\s+Pages|DigitalOcean)\b.{0,100}/gi, category: "deployment" },
+  { re: /(?:using|with)\s+(?:Tailwind(?:CSS)?|Bootstrap|Shadcn|UnoCSS|PandaCSS|Styled\s+Components|Emotion)\b.{0,100}/gi, category: "other" },
   { re: /(?:switched\s+(?:from|to)|decided\s+(?:to\s+use|against)|going\s+with|opting\s+for)\s+.{10,150}/gi, category: "other" },
 ]
 
