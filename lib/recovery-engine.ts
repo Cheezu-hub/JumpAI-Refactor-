@@ -324,16 +324,17 @@ function inferFilesFromNLP(text: string): InferredFile[] {
 const INCOMPLETE_SIGNALS: Array<{ re: RegExp; signal: string }> = [
   { re: /\bTODO\b[:\s].{5,150}/gi, signal: "TODO marker" },
   { re: /\bFIXME\b[:\s].{5,150}/gi, signal: "FIXME marker" },
-  { re: /\bstill\s+need(?:s)?\s+to\s+implement\b.{0,120}/gi, signal: "still needs implementation" },
-  { re: /\bremaining\s+implementation\b.{0,120}/gi, signal: "remaining implementation" },
-  { re: /\bnext\s+we\s+need\s+to\b.{0,120}/gi, signal: "next step needed" },
-  { re: /\bpartial\s+implementation\b.{0,120}/gi, signal: "partial implementation" },
-  { re: /\bunfinished\b.{0,100}/gi, signal: "unfinished" },
-  { re: /\bnot\s+(?:yet\s+)?implemented\b.{0,100}/gi, signal: "not implemented" },
-  { re: /\b(?:continue|continuing)\s+(?:from|with)\b.{0,120}/gi, signal: "continuation point" },
-  { re: /\/\/\s*TODO.{0,150}/gi, signal: "inline TODO comment" },
-  { re: /\/\/\s*FIXME.{0,150}/gi, signal: "inline FIXME comment" },
-  { re: /throw\s+new\s+Error\s*\(\s*['"`](?:not\s+implemented|todo)/gi, signal: "not-implemented stub" },
+  { re: /\bstill\s+need(?:s)?\s+to\s+implement\b.{0,120}/gi, signal: "implementation debt" },
+  { re: /\bremaining\s+implementation\b.{0,120}/gi, signal: "unimplemented logic" },
+  { re: /\bnext\s+(?:we\s+need\s+to|step\s+is)\b.{0,120}/gi, signal: "next step detected" },
+  { re: /\bpartial\s+implementation\b.{0,120}/gi, signal: "partially complete" },
+  { re: /\bunfinished\b.{0,100}/gi, signal: "unfinished work" },
+  { re: /\bnot\s+(?:yet\s+)?implemented\b.{0,100}/gi, signal: "placeholder / stub" },
+  { re: /\b(?:continue|continuing)\s+(?:from|with)\b.{0,120}/gi, signal: "continuation anchor" },
+  { re: /\/\/\s*TODO.{0,150}/gi, signal: "source comment (todo)" },
+  { re: /\/\/\s*FIXME.{0,150}/gi, signal: "source comment (fixme)" },
+  { re: /throw\s+new\s+Error\s*\(\s*['"`](?:not\s+implemented|todo)/gi, signal: "runtime exception stub" },
+  { re: /\bneeds\s+(?:to\s+be\s+)?refactored\b.{0,120}/gi, signal: "refactor pending" },
 ]
 
 // PRIORITY 3: Extract structured pending module lists
