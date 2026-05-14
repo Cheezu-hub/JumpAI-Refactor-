@@ -374,7 +374,7 @@ export function JumpPanel() {
           </div>
 
           <div style={{ display: "flex", borderBottom: "1px solid rgba(255,255,255,0.05)", padding: "0 6px", overflowX: "auto", scrollbarWidth: "none" }}>
-            {(["debug", "continue", "preview", "recover"] as Tab[]).map((t) => {
+            {(["recover", "continue", "preview", "debug"] as Tab[]).map((t) => {
               const disabled = !hasResult && t !== "continue" && t !== "debug" && t !== "recover"
               const isActive = tab === t
               const isDebug = t === "debug"
