@@ -11,6 +11,68 @@
 
 import type { RawMessage } from "./extractor"
 
+// ─── PRIORITY 1: NOISE GATE ───────────────────────────────────────────────────
+// Filter sidebar junk, upgrade prompts, UI chrome and artifact labels
+// BEFORE any processing. This is the single highest-impact improvement.
+
+const NOISE_EXACT = new Set([
+  "free plan", "pro plan", "team plan", "enterprise plan",
+  "upgrade", "upgrade to pro", "upgrade now", "upgrade plan",
+  "new chat", "new conversation", "start new chat",
+  "recent conversations", "starred conversations",
+  "search conversations", "search chats",
+  "settings", "sign out", "sign in", "log in", "log out",
+  "keyboard shortcuts", "shortcuts",
+  "projects", "recents", "starred",
+  "copy", "edit", "retry", "regenerate", "stop generating",
+  "like", "dislike", "thumbs up", "thumbs down",
+  "share", "export", "model:", "switch model",
+  "back", "close", "cancel",
+  "send message", "message claude", "message chatgpt",
+  "claude.ai", "anthropic", "openai",
+  "artifacts", "artifact", "preview", "code", "run",
+  "copy code", "download", "open in new tab",
+])
+
+const NOISE_PATTERNS_GATE: RegExp[] = [
+  /^[\d,]+\s*tokens?$/i,
+  /^\d+:\d+\s*(am|pm)?$/i,
+  /^(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\s+\d+/i,
+  /^\d+\s*\/\s*\d+$/,
+  /^today$|^yesterday$/i,
+  /^\$\d+\s*\/\s*(month|mo|yr|year)/i,
+  /^[A-Z\s]{3,25}$/, // all-caps UI labels
+  /^\s*[-–—]{2,}\s*$/, // separator lines
+  /^(ctrl|cmd|alt|shift|tab|esc|enter|space)\s*[+:]/i, // keyboard shortcuts
+  /^\[\d+\]\s*$/, // bare footnote refs
+]
+
+function isRecoveryNoise(text: string): boolean {
+  const t = text.trim()
+  if (t.length < 4) return true
+  const lo = t.toLowerCase()
+  if (NOISE_EXACT.has(lo)) return true
+  if (NOISE_PATTERNS_GATE.some(r => r.test(t))) return true
+  // Short all-caps with no real content
+  if (t.length < 40 && /^[A-Z0-9\s.,!?]+$/.test(t) && t.split(" ").length < 5) return true
+  return false
+}
+
+function filterMessages(messages: RawMessage[]): RawMessage[] {
+  return messages
+    .filter(m => !isRecoveryNoise(m.content))
+    .map(m => ({
+      ...m,
+      // Strip common UI chrome from content before processing
+      content: m.content
+        .replace(/^(Copy|Edit|Retry|Regenerate|Like|Dislike|Share|Export)\s*$/gim, "")
+        .replace(/^(Artifacts?|Preview|Run|Download)\s*$/gim, "")
+        .replace(/^\s*[-–—]{3,}\s*$/gm, "")
+        .trim()
+    }))
+    .filter(m => m.content.length > 8)
+}
+
 // ─── Public Types ─────────────────────────────────────────────────────────────
 
 export interface RecoveredCodeBlock {
@@ -92,7 +154,36 @@ function extractNearestHeading(content: string, blockOffset: number): string | u
 
 // ─── LAYER 1 — Deterministic File Detection ───────────────────────────────────
 
+// PRIORITY 4: Technology/library blocklist — these look like files but are NOT
+const TECH_NAMES = new Set([
+  "node.js", "nodejs", "react", "vue", "angular", "svelte", "solid",
+  "next.js", "nextjs", "nuxt", "remix", "astro", "vite",
+  "express", "fastify", "nest.js", "nestjs",
+  "prisma", "drizzle", "mongoose", "sequelize", "typeorm",
+  "supabase", "firebase", "planetscale", "neon",
+  "postgresql", "mysql", "sqlite", "mongodb",
+  "tailwindcss", "tailwind", "bootstrap", "shadcn",
+  "zustand", "redux", "jotai", "recoil",
+  "nextauth", "auth.js", "clerk", "lucia",
+  "vercel", "netlify", "railway", "fly.io",
+  "typescript", "javascript", "python", "rust", "golang",
+  "webpack", "esbuild", "turbopack", "parcel",
+  "jest", "vitest", "playwright", "cypress",
+  "eslint", "prettier", "husky",
+])
+
+// Requires either a path separator OR a known project-relative prefix
+// to avoid matching bare words that happen to have extensions
 const EXPLICIT_FILE_RE = /\b([\w.\-/]+\.(?:tsx?|jsx?|py|rs|go|java|kt|swift|rb|php|css|scss|html|json|yaml|yml|toml|env|md|sql|sh|bash|prisma|graphql|vue|svelte))\b/g
+
+function isLikelyTechName(f: string): boolean {
+  const base = f.split("/").pop()?.toLowerCase() ?? ""
+  // reject bare single-segment entries that match known tech names
+  if (!f.includes("/") && TECH_NAMES.has(base.replace(/\.(ts|js|tsx|jsx|py)$/, ""))) return true
+  // reject suspiciously short bare filenames with no directory context
+  if (!f.includes("/") && f.length < 6) return true
+  return false
+}
 
 function extractExplicitFiles(text: string): string[] {
   const files: string[] = []
@@ -104,6 +195,7 @@ function extractExplicitFiles(text: string): string[] {
     if (seen.has(f)) continue
     if (f.includes("node_modules")) continue
     if (f.split("/").length > 6) continue
+    if (isLikelyTechName(f)) continue
     seen.add(f)
     files.push(f)
   }
@@ -239,12 +331,68 @@ const INCOMPLETE_SIGNALS: Array<{ re: RegExp; signal: string }> = [
   { re: /throw\s+new\s+Error\s*\(\s*['"`](?:not\s+implemented|todo)/gi, signal: "not-implemented stub" },
 ]
 
+// PRIORITY 3: Extract structured pending module lists
+// Detects patterns like:
+//   "Pending:\n- calculations\n- simulations\n- reports"
+//   "Still need to implement: X, Y, Z"
+
+const PENDING_LIST_HEADER = /(?:pending|still\s+need|remaining|not\s+yet\s+done|todo\s+list|incomplete|left\s+to\s+implement|haven't\s+(?:done|built|implemented))[:\s]{0,10}/gi
+
+function extractPendingLists(text: string): IncompleteItem[] {
+  const items: IncompleteItem[] = []
+  const seen = new Set<string>()
+
+  // Find headers and grab the bulleted/numbered list that follows
+  const re = new RegExp(PENDING_LIST_HEADER.source, "gi")
+  let hm: RegExpExecArray | null
+  while ((hm = re.exec(text)) !== null) {
+    const after = text.slice(hm.index + hm[0].length, hm.index + hm[0].length + 800)
+    // Extract list items (-, *, numbered)
+    const listItems = after.match(/^[\s]*(?:[-*•]|\d+\.)[\s]+.{3,120}$/gm) || []
+    for (const li of listItems.slice(0, 8)) {
+      const desc = li.trim().replace(/^[-*•\d.]+\s+/, "").trim()
+      if (desc.length > 3 && !seen.has(desc)) {
+        seen.add(desc)
+        items.push({ description: desc, signal: "pending list" })
+      }
+    }
+    // Also grab inline comma-separated items after the header
+    if (listItems.length === 0) {
+      const inline = after.match(/^(.{5,200})$/m)
+      if (inline) {
+        const parts = inline[1].split(/,|;/).map(s => s.trim()).filter(s => s.length > 3)
+        for (const p of parts.slice(0, 6)) {
+          if (!seen.has(p)) {
+            seen.add(p)
+            items.push({ description: p, signal: "inline pending" })
+          }
+        }
+      }
+    }
+  }
+  return items
+}
+
 function detectIncompleteItems(messages: RawMessage[]): IncompleteItem[] {
   const items: IncompleteItem[] = []
   const seen = new Set<string>()
 
-  // Focus on last 60% of conversation for recency
-  const recent = messages.slice(-Math.max(messages.length, 1))
+  // Bias heavily toward recent messages (last 60%)
+  const cutoff = Math.floor(messages.length * 0.4)
+  const recent = messages.slice(cutoff)
+
+  // Pass 1: structured pending lists (highest value)
+  for (const msg of recent) {
+    const text = msg.content.slice(0, 4000)
+    for (const item of extractPendingLists(text)) {
+      if (!seen.has(item.description)) {
+        seen.add(item.description)
+        items.push(item)
+      }
+    }
+  }
+
+  // Pass 2: signal-based detection
   for (const msg of recent) {
     const text = msg.content.slice(0, 3000)
     for (const { re, signal } of INCOMPLETE_SIGNALS) {
@@ -256,11 +404,11 @@ function detectIncompleteItems(messages: RawMessage[]): IncompleteItem[] {
           seen.add(desc)
           items.push({ description: desc, signal })
         }
-        if (items.length >= 12) break
+        if (items.length >= 15) break
       }
-      if (items.length >= 12) break
+      if (items.length >= 15) break
     }
-    if (items.length >= 12) break
+    if (items.length >= 15) break
   }
   return items
 }
@@ -305,18 +453,68 @@ function extractArchitectureDecisions(messages: RawMessage[]): ArchitectureDecis
 const BLOCKER_RE = /(?:blocked\s+(?:by|on)|can(?:'t|not)\s+(?:proceed|continue|get\s+this\s+to\s+work)|stuck\s+(?:on|with|at)|this\s+is\s+preventing|not\s+sure\s+why|keeps?\s+(?:failing|breaking|throwing)).{0,250}/gi
 const DEBUG_ATTEMPT_RE = /(?:i\s+tried|tried\s+(?:adding|changing|using|removing|setting)|i\s+checked|looked\s+at|inspected|console\.log(?:ged)?).{0,200}/gi
 
+// PRIORITY 2: Accomplishment extraction
+// Extract WHAT WAS DONE, not just what was said.
+// Looks for completion signals: "I've created", "I've implemented", "X is now working"
+
+const ACCOMPLISHMENT_PATTERNS: RegExp[] = [
+  /i(?:'ve|\s+have)\s+(?:created|built|implemented|added|set\s+up|configured|written|updated|fixed|completed|finished|set\s+up)\s+(?:the\s+)?(.{10,180})/gi,
+  /(?:the\s+)?(.{5,100})\s+is\s+now\s+(?:working|complete|done|implemented|ready|functional)/gi,
+  /(?:successfully|just)\s+(?:created|built|implemented|added|fixed|updated)\s+(?:the\s+)?(.{10,150})/gi,
+  /(?:here(?:'s|\s+is)\s+the\s+(?:completed?|implemented|final|updated))\s+(.{5,120})/gi,
+]
+
+function extractAccomplishments(messages: RawMessage[]): string[] {
+  const results: string[] = []
+  const seen = new Set<string>()
+
+  // Only look at assistant messages, biased toward recent ones
+  const assistantMsgs = messages
+    .filter(m => m.role === "assistant")
+    .slice(-8) // last 8 assistant messages
+    .reverse() // most recent first
+
+  for (const msg of assistantMsgs) {
+    const text = msg.content.slice(0, 2000)
+    for (const pat of ACCOMPLISHMENT_PATTERNS) {
+      pat.lastIndex = 0
+      let m: RegExpExecArray | null
+      while ((m = pat.exec(text)) !== null) {
+        const desc = (m[1] || m[0]).trim().replace(/\s+/g, " ").slice(0, 160)
+        if (desc.length > 8 && !seen.has(desc) && !isRecoveryNoise(desc)) {
+          seen.add(desc)
+          results.push(desc)
+        }
+        if (results.length >= 6) break
+      }
+      if (results.length >= 6) break
+    }
+    if (results.length >= 6) break
+  }
+
+  // Fallback if no accomplishment signals found:
+  // grab the most substantive first sentence of each recent assistant message
+  if (results.length === 0) {
+    for (const msg of assistantMsgs.slice(0, 4)) {
+      const sentences = msg.content
+        .split(/(?<=[.!?])\s+/)
+        .filter(s => s.trim().length > 40 && !isRecoveryNoise(s))
+      if (sentences[0]) {
+        const t = sentences[0].trim().slice(0, 180)
+        if (!seen.has(t)) { seen.add(t); results.push(t) }
+      }
+    }
+  }
+
+  return results
+}
+
 function reconstructWorkflowState(messages: RawMessage[]): WorkflowState {
   const recent = messages.slice(-8)
   const allRecent = recent.map(m => m.content.slice(0, 800)).join("\n")
 
-  // Recent activity = last 5 meaningful assistant snippets
-  const recentActivity: string[] = []
-  for (const msg of [...messages].reverse().slice(0, 6)) {
-    if (msg.role !== "assistant") continue
-    const lines = msg.content.split("\n").filter(l => l.trim().length > 30)
-    if (lines[0]) recentActivity.push(lines[0].trim().slice(0, 200))
-    if (recentActivity.length >= 4) break
-  }
+  // PRIORITY 2: accomplishments instead of naive first-line grabbing
+  const recentActivity = extractAccomplishments(messages)
 
   // Active blocker
   let activeBlocker: string | undefined
@@ -330,7 +528,7 @@ function reconstructWorkflowState(messages: RawMessage[]): WorkflowState {
   if (dm) lastDebugAttempt = dm[0].trim().slice(0, 250)
   DEBUG_ATTEMPT_RE.lastIndex = 0
 
-  // Unresolved issues — look for error patterns in recent messages
+  // Unresolved issues — error patterns in recent messages
   const unresolvedIssues: string[] = []
   const ERROR_BRIEF_RE = /(?:TypeError|SyntaxError|Error|failed|cannot\s+resolve|ENOENT)\b.{0,120}/gi
   let em: RegExpExecArray | null
@@ -389,6 +587,9 @@ export function runRecoveryEngine(messages: RawMessage[]): RecoveryEngineResult 
     }
   }
 
+  // PRIORITY 1: Filter noise FIRST before any processing
+  const clean = filterMessages(messages)
+
   // ── 1. Code Block Recovery ─────────────────────────────────────────────────
   const codeBlocks: RecoveredCodeBlock[] = []
   for (const msg of messages) {
@@ -402,11 +603,11 @@ export function runRecoveryEngine(messages: RawMessage[]): RecoveryEngineResult 
     }
   }
 
-  // ── 2. Hybrid File Inference ───────────────────────────────────────────────
+  // ── 2. Hybrid File Inference (uses cleaned messages) ──────────────────────
   const fileMap = new Map<string, InferredFile>()
 
-  // Layer 1 — Deterministic
-  const allText = messages.map(m => m.content.slice(0, 1000)).join("\n")
+  // Layer 1 — Deterministic (run on cleaned text to avoid tech-name false positives)
+  const allText = clean.map(m => m.content.slice(0, 1000)).join("\n")
   for (const path of extractExplicitFiles(allText)) {
     fileMap.set(path, { path, confidence: "high", source: "explicit" })
   }
@@ -426,29 +627,28 @@ export function runRecoveryEngine(messages: RawMessage[]): RecoveryEngineResult 
     if (inferred && !fileMap.has(inferred.path)) {
       fileMap.set(inferred.path, inferred)
     }
-    // Attach inferred file back to block
     if (inferred && !block.inferredFile) block.inferredFile = inferred.path
   }
 
-  // Layer 3 — NLP intent
-  for (const msg of messages.slice(-10)) {
+  // Layer 3 — NLP intent (only recent cleaned messages)
+  for (const msg of clean.slice(-10)) {
     for (const f of inferFilesFromNLP(msg.content)) {
       if (!fileMap.has(f.path)) fileMap.set(f.path, f)
     }
   }
 
-  // ── 3. Incomplete Detection ────────────────────────────────────────────────
-  const incompleteItems = detectIncompleteItems(messages)
+  // ── 3. Incomplete Detection (on cleaned messages) ──────────────────────────
+  const incompleteItems = detectIncompleteItems(clean)
 
-  // ── 4. Architecture Decisions ─────────────────────────────────────────────
-  const architectureDecisions = extractArchitectureDecisions(messages)
+  // ── 4. Architecture Decisions (on cleaned messages) ───────────────────────
+  const architectureDecisions = extractArchitectureDecisions(clean)
 
-  // ── 5. Workflow State ──────────────────────────────────────────────────────
-  const workflowState = reconstructWorkflowState(messages)
+  // ── 5. Workflow State (on cleaned messages) ────────────────────────────────
+  const workflowState = reconstructWorkflowState(clean)
 
-  // ── 6. Goal + Transcript ───────────────────────────────────────────────────
+  // ── 6. Goal + Transcript (goal from raw, transcript from clean) ───────────
   const projectGoal = extractProjectGoal(messages)
-  const recentTranscript = buildRecentTranscript(messages)
+  const recentTranscript = buildRecentTranscript(clean)
 
   return {
     codeBlocks: codeBlocks.slice(0, 30),
