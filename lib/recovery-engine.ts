@@ -15,7 +15,10 @@ import type { RawMessage } from "./extractor"
 // Filter sidebar junk, upgrade prompts, UI chrome and artifact labels
 // BEFORE any processing. This is the single highest-impact improvement.
 
-const NOISE_EXACT = new Set([
+// ─── NOISE GATE CONFIGURATION ────────────────────────────────────────────────
+// Patterns to filter out during extraction to ensure zero-clutter continuity
+
+const NOISE_UI_LABELS = new Set([
   "free plan", "pro plan", "team plan", "enterprise plan",
   "upgrade", "upgrade to pro", "upgrade now", "upgrade plan",
   "new chat", "new conversation", "start new chat",
@@ -27,34 +30,36 @@ const NOISE_EXACT = new Set([
   "copy", "edit", "retry", "regenerate", "stop generating",
   "like", "dislike", "thumbs up", "thumbs down",
   "share", "export", "model:", "switch model",
-  "back", "close", "cancel",
+  "back", "close", "cancel", "help", "feedback",
   "send message", "message claude", "message chatgpt",
-  "claude.ai", "anthropic", "openai",
+  "claude.ai", "anthropic", "openai", "google", "gemini",
   "artifacts", "artifact", "preview", "code", "run",
-  "copy code", "download", "open in new tab",
+  "copy code", "download", "open in new tab", "publish",
 ])
 
-const NOISE_PATTERNS_GATE: RegExp[] = [
+const NOISE_REGEX_PATTERNS: RegExp[] = [
   /^[\d,]+\s*tokens?$/i,
   /^\d+:\d+\s*(am|pm)?$/i,
   /^(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\s+\d+/i,
   /^\d+\s*\/\s*\d+$/,
   /^today$|^yesterday$/i,
   /^\$\d+\s*\/\s*(month|mo|yr|year)/i,
-  /^[A-Z\s]{3,25}$/, // all-caps UI labels
+  /^[A-Z\s]{2,30}$/, // all-caps UI labels
   /^\s*[-–—]{2,}\s*$/, // separator lines
   /^(ctrl|cmd|alt|shift|tab|esc|enter|space)\s*[+:]/i, // keyboard shortcuts
   /^\[\d+\]\s*$/, // bare footnote refs
+  /^[0-9]+$/, // bare numbers
+  /^(step|part)\s+\d+$/i, // bare step indicators without content
 ]
 
 function isRecoveryNoise(text: string): boolean {
   const t = text.trim()
-  if (t.length < 4) return true
+  if (t.length < 3) return true
   const lo = t.toLowerCase()
-  if (NOISE_EXACT.has(lo)) return true
-  if (NOISE_PATTERNS_GATE.some(r => r.test(t))) return true
-  // Short all-caps with no real content
-  if (t.length < 40 && /^[A-Z0-9\s.,!?]+$/.test(t) && t.split(" ").length < 5) return true
+  if (NOISE_UI_LABELS.has(lo)) return true
+  if (NOISE_REGEX_PATTERNS.some(r => r.test(t))) return true
+  // Short all-caps or all-numeric with no real content
+  if (t.length < 40 && /^[A-Z0-9\s.,!?]+$/.test(t) && t.split(" ").length < 4) return true
   return false
 }
 
@@ -65,12 +70,12 @@ function filterMessages(messages: RawMessage[]): RawMessage[] {
       ...m,
       // Strip common UI chrome from content before processing
       content: m.content
-        .replace(/^(Copy|Edit|Retry|Regenerate|Like|Dislike|Share|Export)\s*$/gim, "")
-        .replace(/^(Artifacts?|Preview|Run|Download)\s*$/gim, "")
+        .replace(/^(Copy|Edit|Retry|Regenerate|Like|Dislike|Share|Export|Help|Feedback|Publish)\s*$/gim, "")
+        .replace(/^(Artifacts?|Preview|Run|Download|Code)\s*$/gim, "")
         .replace(/^\s*[-–—]{3,}\s*$/gm, "")
         .trim()
     }))
-    .filter(m => m.content.length > 8)
+    .filter(m => m.content.length > 5)
 }
 
 // ─── Public Types ─────────────────────────────────────────────────────────────
