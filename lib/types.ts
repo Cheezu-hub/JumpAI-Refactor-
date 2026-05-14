@@ -120,9 +120,14 @@ export type MessageType =
    * the session storage key by the background worker.
    */
   | { type: "OPEN_TAB"; url: string; platform: TargetPlatform; packetText?: string }
+  | { type: "RECOVERY_MODE"; packetText: string; platform: TargetPlatform }
   | { type: "ERROR"; message: string }
 
 // ─── UI State ─────────────────────────────────────────────────────────────────
 
 export type PanelState = "idle" | "extracting" | "copied" | "error"
 export type PanelView = "main" | "preview" | "debug"
+
+// ─── Recovery Mode ─────────────────────────────────────────────────────────────
+
+export type RecoveryState = "idle" | "running" | "done" | "error"

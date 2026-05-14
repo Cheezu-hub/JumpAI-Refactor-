@@ -2,11 +2,16 @@ import React, { useCallback, useEffect, useState } from "react"
 import { extractClaudeConversation } from "../lib/extractor"
 import type { ExtractionResult, ExtractionProgress } from "../lib/extractor"
 import { buildContinuationPacket, formatPacketForPlatform } from "../lib/packet-builder"
+import { runRecoveryEngine } from "../lib/recovery-engine"
+import type { RecoveryEngineResult } from "../lib/recovery-engine"
+import { buildRecoveryPacket } from "../lib/recovery-packet-builder"
+import type { RecoveryPacket } from "../lib/recovery-packet-builder"
 import { PLATFORMS } from "../lib/types"
 import type { TargetPlatform, CompressionMode, ContinuationPacket } from "../lib/types"
 import type { ExtractionDiagnosticReport } from "../lib/extraction-logger"
 import { DiagnosticsPanel } from "./DiagnosticsPanel"
 import { ExtractionDebugger } from "./ExtractionDebugger"
+import { RecoveryPanel } from "./RecoveryPanel"
 import { clearAllOverlays } from "../lib/overlay-manager"
 
 type PanelState = "idle" | "extracting" | "copied" | "error" | "warning"
@@ -100,7 +105,7 @@ function PreviewView({ packet, platformId }: { packet: ContinuationPacket; platf
 
 // ── Main Panel ───────────────────────────────────────────────────────────────
 
-type Tab = "continue" | "preview" | "diagnostics" | "debug"
+type Tab = "continue" | "preview" | "diagnostics" | "debug" | "recover"
 
 export function JumpPanel() {
   const [isOpen, setIsOpen] = useState(false)
@@ -116,6 +121,11 @@ export function JumpPanel() {
   const [diagnosticReport, setDiagnosticReport] = useState<ExtractionDiagnosticReport | null>(null)
   const [lastPlatformId, setLastPlatformId] = useState("chatgpt")
   const [progress, setProgress] = useState<ExtractionProgress | null>(null)
+
+  // Recovery Mode state
+  const [recoveryState, setRecoveryState] = useState<"idle" | "running" | "done" | "error">("idle")
+  const [recoveryResult, setRecoveryResult] = useState<RecoveryEngineResult | null>(null)
+  const [recoveryPacket, setRecoveryPacket] = useState<RecoveryPacket | null>(null)
 
   const isLoading = panelState === "extracting"
   const isCopied = panelState === "copied"
@@ -215,6 +225,35 @@ export function JumpPanel() {
     setStatusMsg("")
     handleExtractAndJump()
   }, [handleExtractAndJump])
+
+  // ── Recovery Mode Handler ───────────────────────────────────────────────
+
+  const handleRecover = useCallback(async () => {
+    setRecoveryState("running")
+    try {
+      const result = await extractClaudeConversation()
+      const engineResult = runRecoveryEngine(result.messages)
+      const pkt = buildRecoveryPacket(engineResult)
+      setRecoveryResult(engineResult)
+      setRecoveryPacket(pkt)
+      setRecoveryState("done")
+    } catch (err) {
+      console.error("[JumpAI Recovery]", err)
+      setRecoveryState("error")
+    }
+  }, [])
+
+  const handleRecoveryJump = useCallback((platformId: "chatgpt" | "gemini", packetText: string) => {
+    const platform = PLATFORMS.find(p => p.id === platformId)
+    if (!platform) return
+    navigator.clipboard.writeText(packetText).catch(() => {})
+    chrome.runtime.sendMessage({
+      type: "OPEN_TAB",
+      url: platform.url,
+      platform: platform.id,
+      packetText
+    })
+  }, [])
 
 
   useEffect(() => {
@@ -335,25 +374,30 @@ export function JumpPanel() {
           </div>
 
           <div style={{ display: "flex", borderBottom: "1px solid rgba(255,255,255,0.05)", padding: "0 6px", overflowX: "auto", scrollbarWidth: "none" }}>
-            {(["debug", "continue", "preview"] as Tab[]).map((t) => {
-              const disabled = !hasResult && t !== "continue" && t !== "debug"
+            {(["debug", "continue", "preview", "recover"] as Tab[]).map((t) => {
+              const disabled = !hasResult && t !== "continue" && t !== "debug" && t !== "recover"
               const isActive = tab === t
               const isDebug = t === "debug"
-              const color = isActive ? (isDebug ? "#3b82f6" : "#cc785c") : "rgba(255,255,255,0.3)"
+              const isRecover = t === "recover"
+              const color = isActive
+                ? (isDebug ? "#3b82f6" : isRecover ? "#a78bfa" : "#cc785c")
+                : "rgba(255,255,255,0.3)"
               
               return (
                 <button key={t} onClick={() => !disabled && setTab(t)} style={{
                   padding: "10px 10px", fontSize: 10, fontWeight: 700, letterSpacing: "0.04em",
                   color: color,
                   background: "transparent", border: "none", outline: "none", textTransform: "uppercase",
-                  borderBottom: isActive ? `2px solid ${isDebug ? "#3b82f6" : "#cc785c"}` : "2px solid transparent",
+                  borderBottom: isActive ? `2px solid ${isDebug ? "#3b82f6" : isRecover ? "#a78bfa" : "#cc785c"}` : "2px solid transparent",
                   cursor: disabled ? "not-allowed" : "pointer", marginBottom: -1,
                   opacity: disabled ? 0.3 : 1, transition: "all 0.15s", whiteSpace: "nowrap",
                   display: "flex", alignItems: "center", gap: 5,
                 }}>
                   {isDebug && <span style={{ fontSize: 10, filter: isActive ? "none" : "grayscale(1) opacity(0.5)" }}>🔬</span>}
-                  {t}
+                  {isRecover && <span style={{ fontSize: 10, filter: isActive ? "none" : "grayscale(1) opacity(0.5)" }}>🔄</span>}
+                  {t === "recover" ? "Recover" : t}
                   {isDebug && <span style={{ width: 4, height: 4, borderRadius: "50%", background: "#f87171", marginLeft: -2, marginTop: -6 }} />}
+                  {isRecover && recoveryState === "done" && <span style={{ width: 4, height: 4, borderRadius: "50%", background: "#a78bfa", marginLeft: -2, marginTop: -6 }} />}
                 </button>
               )
             })}
@@ -387,11 +431,24 @@ export function JumpPanel() {
 
           {tab === "debug" && <ExtractionDebugger />}
 
+          {tab === "recover" && (
+            <RecoveryPanel
+              recoveryResult={recoveryResult}
+              recoveryPacket={recoveryPacket}
+              recoveryState={recoveryState}
+              onRecover={handleRecover}
+              onJump={handleRecoveryJump}
+              isParentLoading={isLoading}
+            />
+          )}
+
 
           <div style={{ padding: "8px 14px", borderTop: "1px solid rgba(255,255,255,0.04)" }}>
             <p style={{ fontSize: 9.5, color: "rgba(255,255,255,0.2)", margin: 0, lineHeight: 1.5 }}>
               {tab === "debug"
                 ? "🔬 Debug mode: scan DOM, visualize candidates, compare selectors."
+                : tab === "recover"
+                ? "🔄 Recovery: extract code, files, and workflow state for seamless AI handoff."
                 : mode === "compact" ? "Compact: <1k tokens. Core issues & next steps only."
                 : mode === "detailed" ? "Detailed: ~5k tokens. Full debug context & history."
                 : "Balanced: ~2.5k tokens. Best for most continuations."}
