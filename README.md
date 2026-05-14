@@ -32,9 +32,11 @@ CURRENT PROGRESS
 ## Features
 
 - 🔴 **Floating button** on claude.ai — always accessible
+- 🔄 **Recovery Mode** — Extract files, architecture, and incomplete work from interrupted sessions
 - 🧠 **Smart context extraction** — no AI APIs, pure deterministic logic
 - 📋 **Auto clipboard copy** — structured packet ready to paste
 - 🚀 **One-click platform jump** — ChatGPT or Gemini opens instantly
+- 🔬 **Diagnostics Engine** — Visual DOM debugger to repair structural extraction failures
 - 🎨 **Native aesthetic** — feels at home on Claude's dark UI
 
 ---
@@ -49,12 +51,16 @@ jumpai/
 │   └── index.ts            # Service worker — handles tab opening
 ├── components/
 │   ├── JumpPanel.tsx       # Main floating panel component
+│   ├── RecoveryPanel.tsx   # UI for reviewing recovered workflow state
 │   ├── PlatformButton.tsx  # Platform selection button
+│   ├── DiagnosticsPanel.tsx# Extractor health and observability UI
 │   └── Icons.tsx           # SVG icon components
 ├── lib/
 │   ├── types.ts            # Shared TypeScript types
 │   ├── extractor.ts        # Claude DOM extraction logic
-│   └── context-generator.ts # Continuation packet generator
+│   ├── packet-builder.ts   # Standard continuation packet generator
+│   ├── recovery-engine.ts  # Hybrid file inference & state reconstruction
+│   └── recovery-packet-builder.ts # Formats recovery state for handoff
 ├── popup.tsx               # Toolbar popup (non-Claude pages)
 ├── style.css               # Global styles + Tailwind directives
 ├── tailwind.config.js
