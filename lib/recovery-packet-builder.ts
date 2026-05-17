@@ -38,66 +38,38 @@ function buildGoalSection(result: RecoveryEngineResult): string {
   return result.projectGoal
 }
 
-function buildFilesSection(result: RecoveryEngineResult): string {
-  if (result.inferredFiles.length === 0) return ""
-  const lines: string[] = []
-  const bySource = {
-    explicit: result.inferredFiles.filter(f => f.source === "explicit"),
-    heuristic: result.inferredFiles.filter(f => f.source === "heuristic"),
-    nlp: result.inferredFiles.filter(f => f.source === "nlp"),
-  }
-  if (bySource.explicit.length > 0) {
-    lines.push(...bySource.explicit.slice(0, 12).map(f => `- ${f.path}`))
-  }
-  if (bySource.heuristic.length > 0) {
-    const suffix = bySource.heuristic.map(f => `- ${f.path} *(inferred)*`)
-    lines.push(...suffix.slice(0, 8))
-  }
-  if (bySource.nlp.length > 0 && lines.length < 15) {
-    lines.push(...bySource.nlp.slice(0, 4).map(f => `- ${f.path} *(likely)*`))
-  }
-  return lines.join("\n")
-}
-
-function buildArchSection(result: RecoveryEngineResult): string {
+function buildStackSection(result: RecoveryEngineResult): string {
   if (result.architectureDecisions.length === 0) return ""
   return result.architectureDecisions
-    .slice(0, 8)
+    .slice(0, 10)
     .map(d => `- ${d.text}`)
     .join("\n")
 }
 
-function buildIncompleteSection(result: RecoveryEngineResult): string {
+function buildCompletedSection(result: RecoveryEngineResult): string {
+  const { completedWork } = result.workflowState
+  if (!completedWork || completedWork.length === 0) return ""
+  return completedWork.map(w => `- ${w}`).join("\n")
+}
+
+function buildBlockerSection(result: RecoveryEngineResult): string {
+  return result.workflowState.currentBlocker || ""
+}
+
+function buildPendingSection(result: RecoveryEngineResult): string {
   if (result.incompleteItems.length === 0) return ""
   return result.incompleteItems
-    .slice(0, 6)
+    .slice(0, 8)
     .map(i => `- ${i.description}`)
     .join("\n")
 }
 
-function buildWorkflowSection(result: RecoveryEngineResult): string {
-  const { workflowState } = result
-  const parts: string[] = []
+function buildAffectedAreaSection(result: RecoveryEngineResult): string {
+  return result.workflowState.likelyAffectedArea || ""
+}
 
-  if (workflowState.recentActivity.length > 0) {
-    parts.push("**Recently completed:**")
-    parts.push(...workflowState.recentActivity.slice(0, 3).map(a => `- ${a}`))
-  }
-
-  if (workflowState.activeBlocker) {
-    parts.push(`\n**Active blocker:** ${workflowState.activeBlocker}`)
-  }
-
-  if (workflowState.lastDebugAttempt) {
-    parts.push(`\n**Last debug attempt:** ${workflowState.lastDebugAttempt}`)
-  }
-
-  if (workflowState.unresolvedIssues.length > 0) {
-    parts.push("\n**Unresolved issues:**")
-    parts.push(...workflowState.unresolvedIssues.slice(0, 3).map(e => `- ${e}`))
-  }
-
-  return parts.join("\n")
+function buildNextStepSection(result: RecoveryEngineResult): string {
+  return result.workflowState.nextImmediateStep || "Continue implementation from the last point in the transcript above."
 }
 
 function buildCodeSection(result: RecoveryEngineResult): string {
