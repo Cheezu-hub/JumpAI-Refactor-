@@ -465,6 +465,7 @@ function extractArchitectureDecisions(messages: RawMessage[]): ArchitectureDecis
 
 const BLOCKER_RE = /(?:blocked\s+(?:by|on)|can(?:'t|not)\s+(?:proceed|continue|get\s+this\s+to\s+work)|stuck\s+(?:on|with|at)|this\s+is\s+preventing|not\s+sure\s+why|keeps?\s+(?:failing|breaking|throwing)).{0,250}/gi
 const DEBUG_ATTEMPT_RE = /(?:i\s+tried|tried\s+(?:adding|changing|using|removing|setting)|i\s+checked|looked\s+at|inspected|console\.log(?:ged)?).{0,200}/gi
+const INTERRUPTION_RE = /(?:generation|response)\s+(?:interrupted|cut\s+off|stopped|halted)|(?:interrupted\s+during).{0,150}/gi
 
 // ─── SEMANTIC DEDUPLICATION ENGINE ───────────────────────────────────────────
 
@@ -528,8 +529,7 @@ function extractAccomplishments(messages: RawMessage[]): string[] {
     if (results.length >= 6) break
   }
 
-  // Fallback if no accomplishment signals found:
-  // grab the most substantive first sentence of each recent assistant message
+  // Fallback if no accomplishment signals found
   if (results.length === 0) {
     for (const msg of assistantMsgs.slice(0, 4)) {
       const sentences = msg.content
@@ -542,7 +542,7 @@ function extractAccomplishments(messages: RawMessage[]): string[] {
     }
   }
 
-  return results
+  return deduplicateSemantically(results)
 }
 
 function reconstructWorkflowState(messages: RawMessage[]): WorkflowState {
