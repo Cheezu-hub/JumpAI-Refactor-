@@ -111,10 +111,11 @@ export interface IncompleteItem {
 }
 
 export interface WorkflowState {
-  recentActivity: string[]   // last N things done
-  activeBlocker?: string
-  lastDebugAttempt?: string
+  completedWork: string[]
+  currentBlocker?: string
   unresolvedIssues: string[]
+  likelyAffectedArea?: string
+  nextImmediateStep?: string
 }
 
 export interface RecoveryEngineResult {
@@ -592,7 +593,7 @@ export function runRecoveryEngine(messages: RawMessage[]): RecoveryEngineResult 
       inferredFiles: [],
       architectureDecisions: [],
       incompleteItems: [],
-      workflowState: { recentActivity: [], unresolvedIssues: [] },
+      workflowState: { completedWork: [], unresolvedIssues: [] },
       projectGoal: "No messages extracted.",
       recentTranscript: "",
       processingMs: 0,
