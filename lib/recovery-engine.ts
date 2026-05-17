@@ -545,28 +545,46 @@ function extractAccomplishments(messages: RawMessage[]): string[] {
   return deduplicateSemantically(results)
 }
 
-function reconstructWorkflowState(messages: RawMessage[]): WorkflowState {
+function reconstructWorkflowState(messages: RawMessage[], fileMap: Map<string, InferredFile>): WorkflowState {
   const recent = messages.slice(-8)
   const allRecent = recent.map(m => m.content.slice(0, 800)).join("\n")
 
-  // PRIORITY 2: accomplishments instead of naive first-line grabbing
-  const recentActivity = extractAccomplishments(messages)
+  // Completed work
+  const completedWork = extractAccomplishments(messages)
 
-  // Active blocker
-  let activeBlocker: string | undefined
-  const bm = BLOCKER_RE.exec(allRecent)
-  if (bm) activeBlocker = bm[0].trim().slice(0, 250)
+  // Blocker Extraction (includes interruption)
+  let currentBlocker: string | undefined
+  const im = INTERRUPTION_RE.exec(allRecent)
+  if (im) {
+    currentBlocker = "Generation interrupted: " + im[0].trim().slice(0, 150)
+  } else {
+    const bm = BLOCKER_RE.exec(allRecent)
+    if (bm) currentBlocker = bm[0].trim().slice(0, 250)
+  }
+  INTERRUPTION_RE.lastIndex = 0
   BLOCKER_RE.lastIndex = 0
 
-  // Last debug attempt
-  let lastDebugAttempt: string | undefined
-  const dm = DEBUG_ATTEMPT_RE.exec(allRecent)
-  if (dm) lastDebugAttempt = dm[0].trim().slice(0, 250)
-  DEBUG_ATTEMPT_RE.lastIndex = 0
+  // Likely affected area
+  let likelyAffectedArea: string | undefined
+  if (fileMap.size > 0) {
+    // Just pick the most confidently inferred recent file
+    const files = [...fileMap.values()]
+    likelyAffectedArea = files.find(f => f.confidence === "high")?.path || files[0].path
+  }
 
-  // Unresolved issues — error patterns in recent messages
+  // Next Step inference
+  let nextImmediateStep: string | undefined
+  if (currentBlocker?.includes("interrupted")) {
+    nextImmediateStep = "Resume the interrupted generation and complete the implementation."
+  } else if (currentBlocker) {
+    nextImmediateStep = "Resolve the current blocker and verify the fix."
+  } else {
+    nextImmediateStep = "Continue implementing the pending tasks."
+  }
+
+  // Unresolved issues
   const unresolvedIssues: string[] = []
-  const ERROR_BRIEF_RE = /(?:TypeError|SyntaxError|Error|failed|cannot\s+resolve|ENOENT)\b.{0,120}/gi
+  const ERROR_BRIEF_RE = /(?:TypeError|SyntaxError|Error|failed|cannot\s+resolve|ENOENT|WARN)\b.{0,120}/gi
   let em: RegExpExecArray | null
   const seen = new Set<string>()
   while ((em = ERROR_BRIEF_RE.exec(allRecent)) !== null) {
@@ -575,7 +593,13 @@ function reconstructWorkflowState(messages: RawMessage[]): WorkflowState {
     if (unresolvedIssues.length >= 4) break
   }
 
-  return { recentActivity, activeBlocker, lastDebugAttempt, unresolvedIssues }
+  return { 
+    completedWork, 
+    currentBlocker, 
+    unresolvedIssues: deduplicateSemantically(unresolvedIssues), 
+    likelyAffectedArea, 
+    nextImmediateStep 
+  }
 }
 
 // ─── PROJECT GOAL EXTRACTION ──────────────────────────────────────────────────
