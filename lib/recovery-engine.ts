@@ -619,13 +619,19 @@ function extractProjectGoal(messages: RawMessage[]): string {
 
 // ─── RECENT TRANSCRIPT ────────────────────────────────────────────────────────
 
-function buildRecentTranscript(messages: RawMessage[], maxMessages = 8, maxChars = 700): string {
+function buildRecentTranscript(messages: RawMessage[], maxMessages = 5, maxChars = 350): string {
+  // PRIORITY 5: Aggressively compress transcript. It's just supporting context now.
   const tail = messages.slice(-maxMessages)
   return tail.map(m => {
     const role = m.role === "user" ? "User" : "Assistant"
-    const text = m.content.trim()
-    const trimmed = text.length > maxChars ? text.slice(0, maxChars) + "…" : text
-    return `**${role}:** ${trimmed}`
+    
+    // Strip code blocks entirely from transcript to save space (they are captured elsewhere)
+    let text = m.content.replace(/```[\s\S]*?```/g, "[Code Block Extracted]").trim()
+    
+    // Aggressive truncate
+    if (text.length > maxChars) text = text.slice(0, maxChars) + "..."
+    
+    return `**${role}:** ${text}`
   }).join("\n\n")
 }
 
@@ -698,13 +704,23 @@ export function runRecoveryEngine(messages: RawMessage[]): RecoveryEngineResult 
   }
 
   // ── 3. Incomplete Detection (on cleaned messages) ──────────────────────────
-  const incompleteItems = detectIncompleteItems(clean)
+  // Filter out any incomplete items that semantically overlap with accomplishments
+  const rawIncomplete = detectIncompleteItems(clean)
+  const incompleteItems = rawIncomplete.filter(item => {
+    // Interruption should be a blocker, not an incomplete item
+    if (INTERRUPTION_RE.test(item.description)) return false
+    return true
+  })
 
   // ── 4. Architecture Decisions (on cleaned messages) ───────────────────────
   const architectureDecisions = extractArchitectureDecisions(clean)
 
   // ── 5. Workflow State (on cleaned messages) ────────────────────────────────
-  const workflowState = reconstructWorkflowState(clean)
+  const workflowState = reconstructWorkflowState(clean, fileMap)
+
+  // Semantic cross-section deduplication
+  const allCompleted = workflowState.completedWork.join(" ")
+  const finalIncomplete = incompleteItems.filter(item => computeSimilarity(item.description, allCompleted) < 0.3)
 
   // ── 6. Goal + Transcript (goal from raw, transcript from clean) ───────────
   const projectGoal = extractProjectGoal(messages)
@@ -714,7 +730,7 @@ export function runRecoveryEngine(messages: RawMessage[]): RecoveryEngineResult 
     codeBlocks: codeBlocks.slice(0, 30),
     inferredFiles: [...fileMap.values()].slice(0, 25),
     architectureDecisions,
-    incompleteItems,
+    incompleteItems: finalIncomplete,
     workflowState,
     projectGoal,
     recentTranscript,
