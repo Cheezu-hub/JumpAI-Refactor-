@@ -96,10 +96,12 @@ function buildCodeSection(result: RecoveryEngineResult): string {
 
 export function buildRecoveryPacket(result: RecoveryEngineResult): RecoveryPacket {
   const goalContent = buildGoalSection(result)
-  const filesContent = buildFilesSection(result)
-  const archContent = buildArchSection(result)
-  const incompleteContent = buildIncompleteSection(result)
-  const workflowContent = buildWorkflowSection(result)
+  const stackContent = buildStackSection(result)
+  const completedContent = buildCompletedSection(result)
+  const blockerContent = buildBlockerSection(result)
+  const pendingContent = buildPendingSection(result)
+  const affectedAreaContent = buildAffectedAreaSection(result)
+  const nextStepContent = buildNextStepSection(result)
   const codeContent = buildCodeSection(result)
   const transcriptContent = result.recentTranscript
 
@@ -109,47 +111,27 @@ export function buildRecoveryPacket(result: RecoveryEngineResult): RecoveryPacke
   }
 
   add("Current Project", "🎯", goalContent)
-  add("Generated Files", "📁", filesContent)
-  add("Architecture Decisions", "🏗", archContent)
-  add("Incomplete Implementations", "⚠️", incompleteContent)
-  add("Current Progress", "⚙️", workflowContent)
-  add("Recovered Code Blocks", "💻", codeContent)
-  add("Recent Transcript", "💬", transcriptContent)
+  add("Stack / Architecture", "🏗", stackContent)
+  add("Completed Work", "✅", completedContent)
+  add("Current Blocker", "⛔", blockerContent)
+  add("Incomplete / Pending Work", "⚠️", pendingContent)
+  add("Likely Affected Area", "🔍", affectedAreaContent)
+  add("Recovered Code Context", "💻", codeContent)
+  add("Next Immediate Step", "➡", nextStepContent)
+  add("Compressed Recent Transcript", "💬", transcriptContent)
 
   // Build the final natural-continuation text
   const lines: string[] = []
 
-  if (goalContent) {
-    lines.push(`## Current Project\n${goalContent}`)
-  }
-  if (filesContent) {
-    lines.push(`## Generated Files\n${filesContent}`)
-  }
-  if (archContent) {
-    lines.push(`## Architecture Decisions\n${archContent}`)
-  }
-  if (workflowContent) {
-    lines.push(`## Current Progress\n${workflowContent}`)
-  }
-  if (incompleteContent) {
-    lines.push(`## Incomplete Implementations\n${incompleteContent}`)
-  }
-  if (result.workflowState.activeBlocker) {
-    // Surface as top-level blocker for extra visibility
-    lines.push(`## Current Blocker\n${result.workflowState.activeBlocker}`)
-  }
-  if (codeContent) {
-    lines.push(`## Recovered Code Blocks\n${codeContent}`)
-  }
-  if (transcriptContent) {
-    lines.push(`## Recent Transcript\n${transcriptContent}`)
-  }
-
-  // Next suggested step — synthesised from incomplete + blocker
-  const nextStep = result.incompleteItems[0]?.description
-    || result.workflowState.activeBlocker
-    || "Continue implementation from the last point in the transcript above."
-  lines.push(`## Next Suggested Step\n${nextStep}`)
+  if (goalContent) lines.push(`Current Project:\n${goalContent}`)
+  if (stackContent) lines.push(`Stack / Architecture:\n${stackContent}`)
+  if (completedContent) lines.push(`Completed Work:\n${completedContent}`)
+  if (blockerContent) lines.push(`Current Blocker:\n${blockerContent}`)
+  if (pendingContent) lines.push(`Incomplete / Pending Work:\n${pendingContent}`)
+  if (affectedAreaContent) lines.push(`Likely Affected Area:\n${affectedAreaContent}`)
+  if (codeContent) lines.push(`Recovered Code Context:\n${codeContent}`)
+  if (nextStepContent) lines.push(`Next Immediate Step:\n${nextStepContent}`)
+  if (transcriptContent) lines.push(`Recent Transcript Context:\n${transcriptContent}`)
 
   const text = lines.join("\n\n").trim()
 
