@@ -466,6 +466,29 @@ function extractArchitectureDecisions(messages: RawMessage[]): ArchitectureDecis
 const BLOCKER_RE = /(?:blocked\s+(?:by|on)|can(?:'t|not)\s+(?:proceed|continue|get\s+this\s+to\s+work)|stuck\s+(?:on|with|at)|this\s+is\s+preventing|not\s+sure\s+why|keeps?\s+(?:failing|breaking|throwing)).{0,250}/gi
 const DEBUG_ATTEMPT_RE = /(?:i\s+tried|tried\s+(?:adding|changing|using|removing|setting)|i\s+checked|looked\s+at|inspected|console\.log(?:ged)?).{0,200}/gi
 
+// ─── SEMANTIC DEDUPLICATION ENGINE ───────────────────────────────────────────
+
+function computeSimilarity(a: string, b: string): number {
+  const wa = new Set(a.toLowerCase().split(/\W+/).filter(w => w.length > 2))
+  const wb = new Set(b.toLowerCase().split(/\W+/).filter(w => w.length > 2))
+  if (wa.size === 0 && wb.size === 0) return 1
+  let intersection = 0
+  for (const w of wa) if (wb.has(w)) intersection++
+  return intersection / (wa.size + wb.size - intersection)
+}
+
+function deduplicateSemantically(strings: string[], threshold = 0.45): string[] {
+  const result: string[] = []
+  for (const s of strings) {
+    const clean = s.trim()
+    if (!clean) continue
+    if (!result.some(r => computeSimilarity(r, clean) > threshold)) {
+      result.push(clean)
+    }
+  }
+  return result
+}
+
 // PRIORITY 2: Accomplishment extraction
 // Extract WHAT WAS DONE, not just what was said.
 // Looks for completion signals: "I've created", "I've implemented", "X is now working"
