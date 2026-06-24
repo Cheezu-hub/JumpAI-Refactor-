@@ -2,17 +2,52 @@
  * JumpAI — Destination Platform Injection Utilities
  *
  * Shared helpers used by ChatGPT and Gemini content scripts to:
- *  - Read and consume pending packets from session storage
- *  - Wait for the target AI editor element to become available
+ *  - Read and consume pending packets from session storage (with retry)
+ *  - Wait for the target AI editor element to become available (with exponential backoff)
  *  - Inject text reliably into contenteditable (ProseMirror / Quill)
  *    and legacy textarea editors
  *  - Show a non-intrusive confirmation toast on the destination page
+ *
+ * KEY RELIABILITY CHANGES:
+ *  - consumePendingPacket: retries for up to 8s so the content script can receive
+ *    the NLP packet even if it arrives after the page loads (race-free).
+ *  - waitForAnyElement: exponential backoff instead of fixed polling.
+ *  - withTimeout: every async operation is guarded against hanging forever.
  */
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 /** Packets older than 5 min are considered stale and are discarded. */
 const STORAGE_TTL_MS = 5 * 60 * 1000
+
+/** How long to retry polling storage before giving up. */
+const PACKET_POLL_TIMEOUT_MS = 8000
+
+/** How often to poll storage while waiting for the packet. */
+const PACKET_POLL_INTERVAL_MS = 150
+
+// ─── Timeout Guard ────────────────────────────────────────────────────────────
+
+/**
+ * Races a promise against a timeout. If the promise doesn't settle within
+ * `ms` milliseconds, resolves with `fallback` instead of hanging forever.
+ */
+export function withTimeout<T>(
+  promise: Promise<T>,
+  ms: number,
+  fallback: T,
+  label?: string
+): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<T>(resolve =>
+      setTimeout(() => {
+        if (label) console.warn(`[JumpAI] withTimeout: "${label}" timed out after ${ms}ms`)
+        resolve(fallback)
+      }, ms)
+    )
+  ])
+}
 
 // ─── Storage Handoff ──────────────────────────────────────────────────────────
 
@@ -24,63 +59,109 @@ export interface PendingPacket {
 
 /**
  * Reads and immediately removes a pending packet for the given platform
- * from chrome.storage.session. Returns null if nothing is pending or the
- * packet has expired. "Consuming" prevents duplicate injection on refresh.
+ * from chrome.storage.session.
+ *
+ * RETRY LOGIC: In the background-first architecture, the tab opens before
+ * the NLP packet has been written to storage. This function polls for up to
+ * `PACKET_POLL_TIMEOUT_MS` milliseconds so the content script can receive
+ * the packet even if it arrives a moment after the page loads.
+ *
+ * Returns null if nothing arrives within the timeout or the packet has expired.
  */
 export async function consumePendingPacket(platform: string): Promise<string | null> {
   const key = `jumpai_pending_${platform}`
+  const startMs = Date.now()
+  let attempts = 0
 
-  // Safety check: session storage might not be available in all contexts or older Chrome
+  console.time(`[JumpAI] storage:read(${platform})`)
+  console.log(`[JumpAI] Waiting for packet — platform: ${platform} (up to ${PACKET_POLL_TIMEOUT_MS}ms)`)
+
+  // Safety check: session storage might not be available
   if (!chrome.storage?.session) {
     console.warn("[JumpAI] chrome.storage.session is unavailable in this context.")
     return null
   }
 
-  try {
-    const result = await chrome.storage.session.get(key)
-    const packet = result[key] as PendingPacket | undefined
+  while (Date.now() - startMs < PACKET_POLL_TIMEOUT_MS) {
+    attempts++
+    try {
+      const result = await chrome.storage.session.get(key)
+      const packet = result[key] as PendingPacket | undefined
 
-    if (!packet) return null
+      if (packet) {
+        if (Date.now() - packet.timestamp > STORAGE_TTL_MS) {
+          await chrome.storage.session.remove(key)
+          console.warn("[JumpAI] Packet expired, discarding.")
+          console.timeEnd(`[JumpAI] storage:read(${platform})`)
+          return null
+        }
 
-    if (Date.now() - packet.timestamp > STORAGE_TTL_MS) {
-      await chrome.storage.session.remove(key)
-      console.warn("[JumpAI] Packet expired, discarding.")
+        // Remove immediately so a page refresh doesn't re-inject
+        await chrome.storage.session.remove(key)
+        const elapsedMs = Date.now() - startMs
+        console.log(`[JumpAI] Packet consumed after ${attempts} attempt(s) in ${elapsedMs}ms — ${packet.text.length} chars`)
+        console.timeEnd(`[JumpAI] storage:read(${platform})`)
+        return packet.text
+      }
+    } catch (err) {
+      // Only log if it's not a standard "extension context invalidated" error
+      const msg = err instanceof Error ? err.message : String(err)
+      if (!msg.includes("context invalidated")) {
+        console.error("[JumpAI] storage.session read failed:", err)
+      }
+      console.timeEnd(`[JumpAI] storage:read(${platform})`)
       return null
     }
 
-    // Remove immediately so a page refresh doesn't re-inject
-    await chrome.storage.session.remove(key)
-    return packet.text
-  } catch (err) {
-    // Only log if it's not a standard "extension context invalidated" error which
-    // happens frequently during development reloads.
-    const msg = err instanceof Error ? err.message : String(err)
-    if (!msg.includes("context invalidated")) {
-      console.error("[JumpAI] storage.session read failed:", err)
-    }
-    return null
+    // Packet not yet available — wait and retry
+    await sleep(PACKET_POLL_INTERVAL_MS)
   }
+
+  const elapsed = Date.now() - startMs
+  console.warn(`[JumpAI] No packet found after ${elapsed}ms and ${attempts} attempts — packet may never have been written`)
+  console.timeEnd(`[JumpAI] storage:read(${platform})`)
+  return null
 }
 
 // ─── DOM Polling ──────────────────────────────────────────────────────────────
 
 /**
  * Polls until one of the given CSS selectors matches an element in the DOM.
- * Returns the first match found along with the selector that matched, or null
- * after maxAttempts × intervalMs milliseconds.
+ * Uses exponential backoff: starts at 100ms, doubles each miss up to 1000ms.
+ * Hard cap of ~20 seconds total (configurable via `maxWaitMs`).
+ *
+ * Returns the first match found along with the selector that matched,
+ * or null after the timeout.
  */
 export async function waitForAnyElement(
   selectors: string[],
-  maxAttempts = 40,
-  intervalMs = 500
+  _maxAttempts = 40,         // kept for API compatibility but maxWaitMs is the real limit
+  _intervalMs = 500,         // kept for API compatibility
+  maxWaitMs = 20_000
 ): Promise<{ element: Element; selector: string } | null> {
-  for (let i = 0; i < maxAttempts; i++) {
+  const startMs = Date.now()
+  let delay = 100             // initial poll interval
+  const MAX_DELAY = 1000      // cap at 1s
+  let attempt = 0
+
+  console.log(`[JumpAI] Polling for editor (${selectors.length} selectors, up to ${maxWaitMs}ms)`)
+
+  while (Date.now() - startMs < maxWaitMs) {
+    attempt++
     for (const selector of selectors) {
       const el = document.querySelector(selector)
-      if (el) return { element: el, selector }
+      if (el) {
+        const elapsed = Date.now() - startMs
+        console.log(`[JumpAI] Editor found: "${selector}" after ${attempt} attempt(s), ${elapsed}ms`)
+        return { element: el, selector }
+      }
     }
-    await sleep(intervalMs)
+
+    await sleep(delay)
+    delay = Math.min(Math.round(delay * 1.5), MAX_DELAY) // exponential backoff
   }
+
+  console.warn(`[JumpAI] Editor not found after ${Date.now() - startMs}ms — tried: ${selectors.join(", ")}`)
   return null
 }
 
@@ -133,6 +214,7 @@ function injectIntoTextarea(ta: HTMLTextAreaElement, text: string): boolean {
     ta.dispatchEvent(new InputEvent("input", { bubbles: true, data: text }))
     ta.dispatchEvent(new Event("change", { bubbles: true }))
     ta.focus()
+    console.log("[JumpAI] Injected via textarea native setter.")
     return true
   } catch (err) {
     console.error("[JumpAI] Textarea injection failed:", err)
@@ -146,17 +228,11 @@ function injectIntoContentEditable(el: HTMLElement, text: string): boolean {
   el.focus()
 
   // ── Method 1: execCommand ─────────────────────────────────────────────────
-  // Works reliably for ProseMirror (ChatGPT) and Quill (Gemini) because both
-  // editors expose the standard `beforeinput` / `input` event pipeline that
-  // execCommand triggers under the hood.
   try {
-    // Select and replace any pre-existing content
     document.execCommand("selectAll", false)
     const inserted = document.execCommand("insertText", false, text)
 
     if (inserted && el.textContent && el.textContent.trim().length > 0) {
-      // Fire an extra synthetic input event so frameworks that debounce
-      // native events still pick up the change
       el.dispatchEvent(new InputEvent("input", { bubbles: true }))
       console.log("[JumpAI] Injected via execCommand(insertText).")
       return true
@@ -164,11 +240,8 @@ function injectIntoContentEditable(el: HTMLElement, text: string): boolean {
   } catch (_) { /* fall through */ }
 
   // ── Method 2: Clipboard paste simulation ─────────────────────────────────
-  // For frameworks that intercept the `paste` ClipboardEvent (Quill, newer
-  // ProseMirror builds). This mirrors what the user would get by pressing Ctrl+V.
   try {
     el.focus()
-    // Ensure the editor is empty before pasting
     document.execCommand("selectAll", false)
     document.execCommand("delete", false)
 
@@ -190,9 +263,6 @@ function injectIntoContentEditable(el: HTMLElement, text: string): boolean {
   } catch (_) { /* fall through */ }
 
   // ── Method 3: Direct DOM mutation + synthetic input event ────────────────
-  // Last resort. Sets textContent directly and dispatches an InputEvent.
-  // Less reliable for React/Vue controlled components but handles any remaining
-  // edge cases.
   try {
     el.focus()
     el.innerHTML = ""

@@ -208,7 +208,7 @@ async function runExtractionAttempt(
   if (rootFound) {
     logger.hydrationOk()
     // Wait for DOM to fully settle after hydration
-    await waitForDOMSettle(document.body, opts.settleMs, 2000)
+    await waitForDOMSettle(document.body, opts.settleMs, 800)
   } else {
     logger.hydrationTimeout(opts.hydrationTimeoutMs)
     warnings.push(`Hydration timeout after ${opts.hydrationTimeoutMs}ms — page may still be loading`)
@@ -241,20 +241,9 @@ async function runExtractionAttempt(
 
   const container = containerResult.el
 
-  // ── Phase 3: DOM health check ──────────────────────────────────────────────
-  const health = checkDOMHealth(container)
-  for (const anomaly of health.anomalies) {
-    logger.mutationWarning(anomaly)
-    warnings.push(anomaly)
-  }
-
-  if (!health.isHydrated) {
-    warnings.push("Container appears unhydrated — waiting an extra 800ms")
-    await new Promise(r => setTimeout(r, 800))
-    await waitForDOMSettle(container, opts.settleMs, 1500)
-  }
-
-  // ── Phase 4: Initial message discovery ────────────────────────────────────
+  // ── Phase 3 + 4: Discover messages first, then validate ──────────────────────
+  // NOTE: checkDOMHealth() runs discoverWithFallbackChain() internally as a probe.
+  // To avoid scanning the DOM twice, we run discovery first and reuse the result.
   emit("Discovering messages", allMessages.length)
 
   const addBatch = (nodes: DiscoveredNode[]): number => {
@@ -316,6 +305,22 @@ async function runExtractionAttempt(
 
   strategyUsed = s
   logger.nodeScanStart(initialNodes.length)
+
+  // ── Lightweight post-scan health check (no extra DOM query) ───────────────
+  const health = checkDOMHealth(container)
+  for (const anomaly of health.anomalies) {
+    logger.mutationWarning(anomaly)
+    warnings.push(anomaly)
+  }
+
+  // Only add extra settle delay if we found ZERO nodes — means page may not
+  // be fully loaded yet. Skip entirely when nodes were already discovered.
+  if (!health.isHydrated && initialNodes.length === 0) {
+    warnings.push("Container appears unhydrated — waiting an extra 400ms")
+    await new Promise(r => setTimeout(r, 400))
+    await waitForDOMSettle(container, opts.settleMs, 800)
+  }
+
   const initialAdded = addBatch(initialNodes)
   logger.nodeScanComplete(initialNodes.length)
   logger.markInitialExtractionDone()

@@ -118,8 +118,14 @@ export type MessageType =
    * Sent by the Claude source content script (claude.tsx) when the user
    * clicks a platform button. `platform` is the TargetPlatform id used as
    * the session storage key by the background worker.
+   * `packetText` is optional — omit it to open the tab without pre-storing a packet.
    */
   | { type: "OPEN_TAB"; url: string; platform: TargetPlatform; packetText?: string }
+  /**
+   * Sent after the tab is already open, to overwrite the session storage key
+   * with the fully-processed NLP packet (replaces the raw fallback written by OPEN_TAB).
+   */
+  | { type: "UPDATE_PACKET"; platform: TargetPlatform; packetText: string }
   | { type: "RECOVERY_MODE"; packetText: string; platform: TargetPlatform }
   | { type: "ERROR"; message: string }
 

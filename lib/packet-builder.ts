@@ -357,41 +357,53 @@ export async function buildContinuationPacket(
   mode: CompressionMode = "balanced"
 ): Promise<{ packet: ContinuationPacket; debugStats: any }> {
   const t0 = performance.now()
+  console.time("[JumpAI] packet:total")
+  console.log(`[JumpAI] Building packet — ${rawMessages.length} messages, mode: ${mode}`)
 
   // 1. Convert to legacy ExtractedMessage shape
+  console.time("[JumpAI] packet:toExtracted")
   const messages = toExtractedMessages(rawMessages)
+  console.timeEnd("[JumpAI] packet:toExtracted")
 
   // Yield to UI thread between heavy steps
   await new Promise(r => setTimeout(r, 0))
 
   // 2. Classify
+  console.time("[JumpAI] packet:classify")
   const classified = classifyMessages(messages)
+  console.timeEnd("[JumpAI] packet:classify")
 
   // Yield to UI thread
   await new Promise(r => setTimeout(r, 0))
 
   // 3. Compress
+  console.time("[JumpAI] packet:compress")
   const { kept, discarded, tokenEstimate, compressionRatio } = compressMessages(classified, mode)
+  console.timeEnd("[JumpAI] packet:compress")
 
   // Yield to UI thread
   await new Promise(r => setTimeout(r, 0))
 
-  // 3. Build packet sections from kept messages
+  // 4. Build packet sections from kept messages
+  console.time("[JumpAI] packet:sections")
   const coreFields = {
-    objective: extractObjective(kept.length > 0 ? kept : classified),
-    currentImplementationStatus: mode === "compact" ? "" : extractImplementationStatus(kept),
-    activeDebuggingContext: extractDebuggingContext(kept),
+    objective:                    extractObjective(kept.length > 0 ? kept : classified),
+    currentImplementationStatus:  mode === "compact" ? "" : extractImplementationStatus(kept),
+    activeDebuggingContext:       extractDebuggingContext(kept),
     importantArchitectureDecisions: mode === "compact" ? "" : extractArchitectureDecisions(kept),
-    filesAndComponents: extractFilesAndComponents(kept.length > 0 ? kept : classified),
-    recentFailures: mode === "compact" ? "" : extractRecentFailures(kept),
-    attemptedFixes: mode === "compact" ? "" : extractAttemptedFixes(kept),
-    knownConstraints: mode === "compact" ? "" : extractKnownConstraints(kept.length > 0 ? kept : classified),
-    nextImmediateAction: extractNextAction(kept.length > 0 ? kept : classified),
-    conversationTranscript: extractConversationTranscript(kept, mode)
+    filesAndComponents:           extractFilesAndComponents(kept.length > 0 ? kept : classified),
+    recentFailures:               mode === "compact" ? "" : extractRecentFailures(kept),
+    attemptedFixes:               mode === "compact" ? "" : extractAttemptedFixes(kept),
+    knownConstraints:             mode === "compact" ? "" : extractKnownConstraints(kept.length > 0 ? kept : classified),
+    nextImmediateAction:          extractNextAction(kept.length > 0 ? kept : classified),
+    conversationTranscript:       extractConversationTranscript(kept, mode)
   }
+  console.timeEnd("[JumpAI] packet:sections")
 
-  // 4. Score the packet
+  // 5. Score the packet
+  console.time("[JumpAI] packet:score")
   const score = scoreContinuation(coreFields, rawMessages.length, kept.length)
+  console.timeEnd("[JumpAI] packet:score")
 
   const packet: ContinuationPacket = {
     ...coreFields,
@@ -402,6 +414,9 @@ export async function buildContinuationPacket(
   }
 
   const processingTimeMs = Math.round(performance.now() - t0)
+  console.timeEnd("[JumpAI] packet:total")
+  console.log(`[JumpAI] Packet built in ${processingTimeMs}ms — kept ${kept.length}/${classified.length} messages, ~${tokenEstimate} tokens`)
+
   const debugStats = buildDebugStats(classified, discarded, processingTimeMs, compressionRatio)
 
   return { packet, debugStats }

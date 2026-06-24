@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState } from "react"
 import { extractClaudeConversation } from "../lib/extractor"
-import type { ExtractionResult, ExtractionProgress } from "../lib/extractor"
+import type { ExtractionResult, ExtractionProgress, RawMessage } from "../lib/extractor"
 import { buildContinuationPacket, formatPacketForPlatform } from "../lib/packet-builder"
 import { runRecoveryEngine } from "../lib/recovery-engine"
 import type { RecoveryEngineResult } from "../lib/recovery-engine"
@@ -17,6 +17,23 @@ import { clearAllOverlays } from "../lib/overlay-manager"
 type PanelState = "idle" | "extracting" | "copied" | "error" | "warning"
 import { JumpAILogo, RefreshIcon } from "./Icons"
 import { PlatformButton } from "./PlatformButton"
+
+// ─── Raw Fallback Builder ─────────────────────────────────────────────────────
+// Builds a plain markdown transcript for immediate clipboard fallback.
+// Used while the NLP packet is being processed in the background.
+function buildRawFallback(messages: RawMessage[]): string {
+  if (messages.length === 0) return "[JumpAI] No messages extracted."
+  const lines = messages.map(m =>
+    `**${m.role === "user" ? "User" : "Assistant"}:** ${m.content.trim()}`
+  )
+  return [
+    "## JumpAI — Conversation Context",
+    "",
+    "_The structured packet is being prepared. Use this raw transcript as context._",
+    "",
+    lines.join("\n\n")
+  ].join("\n")
+}
 
 const STYLES = `
 @keyframes ji-spin { to { transform: rotate(360deg); } }
@@ -132,88 +149,174 @@ export function JumpPanel() {
   const isError = panelState === "error"
   const hasResult = extractionResult !== null
 
+  // ─── Background-first Jump Architecture ───────────────────────────────────
+  //
+  // OLD (serial, blocking):
+  //   Extract → Classify → Compress → Build packet → Open tab   (500ms–2s)
+  //
+  // NEW (parallel):
+  //   Extract → Open tab immediately (< 400ms from click)
+  //          → NLP runs in background
+  //          → UPDATE_PACKET when done (content script polls up to 8s)
+  //
+  // For the Preview-only flow (no platform), NLP still runs synchronously
+  // so the preview panel has a full packet to display.
+  //
   const handleExtractAndJump = useCallback(async (platform?: typeof PLATFORMS[0], forceContinue = false) => {
     if (platform) {
       setActiveTarget(platform.id)
       setLastPlatformId(platform.id)
     }
 
-    if (!forceContinue) {
-      setPanelState("extracting")
-      setStatusMsg("Scrolling to extract history…")
-      setProgress(null)
-
-      try {
-        const result = await extractClaudeConversation((p) => {
-          setProgress(p)
-          setStatusMsg(`Extracting… ${p.totalFound} messages found`)
-        })
-
-        setExtractionResult(result)
-        setDiagnosticReport(result.diagnostics ?? null)
-
-        setStatusMsg("Classifying & compressing…")
-        await new Promise(r => setTimeout(r, 60))
-
-        const { packet: built, debugStats: stats } = await buildContinuationPacket(result.messages, mode)
-        setPacket(built)
-        setDebugStats(stats)
-
-        const isReliable = !result.warnings.some(w => w.includes("incomplete") || w.includes("failed") || w.includes("0 messages"))
-
-        if (!isReliable) {
-          setPanelState("warning")
-          setStatusMsg(result.messages.length === 0 ? "Extraction failed — check Diagnostics" : "Incomplete extraction detected.")
-          setTab("diagnostics")
-          return // Stop here, wait for user to click "Continue Anyway"
-        }
-
-        // If reliable, fall through to jumping
-      } catch (err) {
-        console.error("[JumpAI]", err)
-        setPanelState("error")
-        setStatusMsg("Extraction crashed — check Diagnostics")
-        setTab("diagnostics")
-        setTimeout(() => { setPanelState("idle"); setActiveTarget(null) }, 3000)
-        return
-      }
-    }
-
-      // -- Jumping logic (reached if reliable OR if forceContinue is true) --
+    // ── forceContinue path: packet already built from a previous extraction ──
+    if (forceContinue) {
       if (platform && packet) {
         const text = formatPacketForPlatform(packet, platform.id)
-
-        // Store packet in session AND open the tab — do these in parallel.
-        // Clipboard write is best-effort (non-blocking) so it never blocks the jump.
-        navigator.clipboard.writeText(text).catch(() => {
-          console.warn("[JumpAI] Clipboard write failed — injection will still work via session storage.")
-        })
-
+        navigator.clipboard.writeText(text).catch(() => {})
         setPanelState("copied")
         setStatusMsg(`✓ Jumping to ${platform.label}…`)
-
-        // Small pause so the user sees the status message before the tab switches
-        await new Promise(r => setTimeout(r, 400))
-
-        // Open the tab — background worker stores the packet before creating the tab
+        await new Promise(r => setTimeout(r, 300))
         chrome.runtime.sendMessage({
           type: "OPEN_TAB",
           url: platform.url,
           platform: platform.id,
           packetText: text
         })
-
         setTimeout(() => { setPanelState("idle"); setActiveTarget(null) }, 2500)
-      } else if (!platform && !forceContinue) {
-        setPanelState("idle")
-        setStatusMsg("")
-        setTab("preview")
-      } else if (forceContinue && !platform) {
-        // forced preview
+      } else {
+        // forced preview (no platform)
         setPanelState("idle")
         setStatusMsg("")
         setTab("preview")
       }
+      return
+    }
+
+    // ── Normal flow ──────────────────────────────────────────────────────────
+    setPanelState("extracting")
+    setStatusMsg("Extracting conversation…")
+    setProgress(null)
+
+    let result: ExtractionResult
+    try {
+      console.time("[JumpAI] extract")
+      console.log("[JumpAI] Extraction started")
+
+      // 10-second hard timeout on extraction — never hang forever
+      result = await Promise.race([
+        extractClaudeConversation((p) => {
+          setProgress(p)
+          setStatusMsg(`Extracting… ${p.totalFound} messages found`)
+        }),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error("Extraction timed out after 10s")), 10_000)
+        )
+      ])
+
+      console.timeEnd("[JumpAI] extract")
+      console.log(`[JumpAI] Extraction done: ${result.messages.length} messages, ${result.warnings.length} warning(s)`)
+    } catch (err) {
+      console.error("[JumpAI] Extraction failed:", err)
+      setPanelState("error")
+      setStatusMsg("Extraction crashed — check Diagnostics")
+      setTab("diagnostics")
+      setTimeout(() => { setPanelState("idle"); setActiveTarget(null) }, 3000)
+      return
+    }
+
+    setExtractionResult(result)
+    setDiagnosticReport(result.diagnostics ?? null)
+
+    const isReliable = !result.warnings.some(
+      w => w.includes("incomplete") || w.includes("failed") || w.includes("0 messages")
+    )
+
+    if (!isReliable && result.messages.length === 0) {
+      setPanelState("warning")
+      setStatusMsg("Extraction failed — check Diagnostics")
+      setTab("diagnostics")
+      return
+    }
+
+    // ── Platform jump: open tab immediately, NLP in background ──────────────
+    if (platform) {
+      setPanelState("copied")
+      setStatusMsg(`✓ Opening ${platform.label}…`)
+      console.log(`[JumpAI] Opening ${platform.label} tab immediately`)
+
+      // Open the tab NOW — no packet yet.
+      // The content script on the destination page polls storage for up to 8s,
+      // so it will receive the NLP packet once it's ready (usually < 500ms).
+      console.time("[JumpAI] tabOpen")
+      chrome.runtime.sendMessage({
+        type: "OPEN_TAB",
+        url: platform.url,
+        platform: platform.id
+        // no packetText — content script will wait for UPDATE_PACKET
+      }, () => {
+        console.timeEnd("[JumpAI] tabOpen")
+        console.log("[JumpAI] Tab open message sent to background")
+      })
+
+      // Also write to clipboard as a best-effort fallback (raw messages)
+      const rawFallback = buildRawFallback(result.messages)
+      navigator.clipboard.writeText(rawFallback).catch(() => {})
+
+      // Run NLP in background — does NOT block the tab from opening
+      console.log("[JumpAI] Starting background NLP processing")
+      buildContinuationPacket(result.messages, mode)
+        .then(({ packet: built, debugStats: stats }) => {
+          setPacket(built)
+          setDebugStats(stats)
+          const text = formatPacketForPlatform(built, platform.id)
+          navigator.clipboard.writeText(text).catch(() => {}) // update clipboard too
+
+          // Overwrite storage with the processed NLP packet
+          // The content script is polling and will pick this up
+          console.time("[JumpAI] updatePacket")
+          chrome.runtime.sendMessage(
+            { type: "UPDATE_PACKET", platform: platform.id, packetText: text },
+            () => {
+              console.timeEnd("[JumpAI] updatePacket")
+              console.log("[JumpAI] NLP packet delivered to storage")
+            }
+          )
+        })
+        .catch(err => {
+          // NLP failed — the raw fallback is still on the clipboard
+          console.error("[JumpAI] Background NLP failed (raw clipboard fallback available):", err)
+        })
+
+      setTimeout(() => { setPanelState("idle"); setActiveTarget(null) }, 2500)
+      return
+    }
+
+    // ── Preview-only flow (no platform clicked) ──────────────────────────────
+    // Run NLP synchronously so the preview panel has a full packet to display.
+    setStatusMsg("Classifying & compressing…")
+    await new Promise(r => setTimeout(r, 30)) // brief yield for UI update
+
+    try {
+      const { packet: built, debugStats: stats } = await buildContinuationPacket(result.messages, mode)
+      setPacket(built)
+      setDebugStats(stats)
+
+      if (!isReliable) {
+        setPanelState("warning")
+        setStatusMsg("Incomplete extraction detected.")
+        setTab("diagnostics")
+        return
+      }
+
+      setPanelState("idle")
+      setStatusMsg("")
+      setTab("preview")
+    } catch (err) {
+      console.error("[JumpAI] Packet build failed:", err)
+      setPanelState("error")
+      setStatusMsg("Processing crashed — check Diagnostics")
+      setTimeout(() => { setPanelState("idle") }, 3000)
+    }
   }, [mode, packet])
 
   const handleRefresh = useCallback(() => {

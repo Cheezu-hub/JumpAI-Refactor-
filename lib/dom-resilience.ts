@@ -50,13 +50,13 @@ export interface ResilienceOptions {
 }
 
 const DEFAULTS: Required<ResilienceOptions> = {
-  settleMs: 200,          // was 400
-  hydrationTimeoutMs: 3000, // was 6000 — if page is already loaded, 3s is plenty
-  retryAttempts: 2,       // was 3 — each retry adds retryDelayMs delay
-  retryDelayMs: 600,      // was 800
+  settleMs: 80,             // fast-exit path in waitForDOMSettle makes this rarely reached
+  hydrationTimeoutMs: 1500, // 1.5s is plenty for an already-loaded SPA page
+  retryAttempts: 2,
+  retryDelayMs: 300,        // was 600 — halved; short chats never need a retry
   scrollStepPx: 1000,
-  scrollPauseMs: 250,     // was 450
-  maxScrollAttempts: 20,  // was 45 — only matters if scroll recovery runs at all
+  scrollPauseMs: 150,       // was 250
+  maxScrollAttempts: 20,
   noNewCountLimit: 3,
 }
 
@@ -125,20 +125,28 @@ export function detectSelectorDrift(activeSelector: string | null, currentCount:
  * Waits for the DOM to stop mutating for `settleMs` consecutive milliseconds.
  * Resolves early if the DOM settles. Rejects on timeout.
  */
+// Fast-exit: if the DOM is already quiet, resolve in FAST_QUIET_MS instead of settleMs.
+// This is the primary speedup for short, already-loaded chats.
+const FAST_QUIET_MS = 50
+
 export function waitForDOMSettle(
   root: Element | Document,
   settleMs = 400,
   timeoutMs = 4000
 ): Promise<"settled" | "timeout"> {
   return new Promise(resolve => {
+    let mutated = false
     let timer: ReturnType<typeof setTimeout>
+
     const deadline = setTimeout(() => {
       observer.disconnect()
       resolve("timeout")
     }, timeoutMs)
 
     const observer = new MutationObserver(() => {
+      mutated = true
       clearTimeout(timer)
+      // DOM is changing — wait the full settleMs for it to calm down
       timer = setTimeout(() => {
         observer.disconnect()
         clearTimeout(deadline)
@@ -153,12 +161,16 @@ export function waitForDOMSettle(
       characterData: false,
     })
 
-    // Kick the timer — if no mutations happen at all, resolve immediately
+    // Fast-exit: if no mutations arrive within FAST_QUIET_MS, the DOM is already
+    // static — resolve immediately rather than waiting the full settleMs.
     timer = setTimeout(() => {
-      observer.disconnect()
-      clearTimeout(deadline)
-      resolve("settled")
-    }, settleMs)
+      if (!mutated) {
+        observer.disconnect()
+        clearTimeout(deadline)
+        resolve("settled")
+      }
+      // If mutations have arrived, the MutationObserver timer takes over.
+    }, FAST_QUIET_MS)
   })
 }
 
