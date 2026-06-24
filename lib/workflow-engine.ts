@@ -20,28 +20,34 @@ import type { RawMessage } from "./extractor"
 // processing. This is the single highest-impact change.
 
 const NOISE_PATTERNS: RegExp[] = [
-  // AI disclaimer / brand lines
+  // AI disclaimer / brand lines — these are the most common source of bad objectives
   /claude is (an )?ai/i,
   /please double-?check (my )?responses/i,
   /i can make mistakes/i,
   /ai (can|may) make mistakes/i,
+  /responses may be inaccurate/i,
+  /claude may make mistakes/i,
 
-  // Upgrade / plan prompts
-  /\bfree plan\b/i,
-  /\bupgrade (to pro|now|plan)?\b/i,
-  /\bpro plan\b/i,
-  /\bteam plan\b/i,
-  /\benterprise plan\b/i,
+  // Upgrade / plan prompts (standalone phrases)
+  /^free plan$/i,
+  /^upgrade(\s+to\s+(pro|team|enterprise))?$/i,
+  /^pro plan$/i,
+  /^team plan$/i,
+  /^enterprise plan$/i,
 
-  // UI chrome
-  /\bnew chat\b/i,
-  /\bnew conversation\b/i,
-  /\bartifacts?\b/i,
-  /\bprojects\b/i,
-  /\bshare\b/i,
-  /\bcustomize\b/i,
+  // UI navigation chrome — only match as entire line/message (not within sentences)
+  /^new chat$/i,
+  /^new conversation$/i,
+  /^artifacts?$/i,
+  /^projects$/i,
+  /^customize$/i,
+  /^share$/i,
 
-  // Worthless AI filler (standalone short phrases)
+  // Keyboard shortcut references
+  /ctrl\+/i,
+  /cmd\+/i,
+
+  // Worthless AI filler (standalone short phrases — line-anchored)
   /^let me (think|write|present|consider|explain|walk you|show you|break).{0,60}$/im,
   /^now i (have a complete picture|can see|understand).{0,80}$/im,
   /^all (validations|checks|tests) passed\.?$/im,
@@ -95,8 +101,11 @@ export function filterNoiseMessages(messages: RawMessage[]): RawMessage[] {
 }
 
 // ─── 2. ROLE-AWARE OBJECTIVE EXTRACTION ───────────────────────────────────────
-// Objective ONLY from user messages with >= 50 chars.
-// Sort by length DESC — longest user message is usually the task description.
+// Objective ONLY from user messages with >= 20 chars that aren't noise.
+// Prefers: longest message, then first message with an action verb.
+
+// Action verbs that indicate task-oriented user messages
+const TASK_VERB_RE = /\b(build|create|generate|fill|implement|fix|analyze|develop|write|make|add|refactor|migrate|design|integrate|update|set up)\b/i
 
 /**
  * Extract the project objective from user messages only.
@@ -105,16 +114,29 @@ export function filterNoiseMessages(messages: RawMessage[]): RawMessage[] {
 export function extractObjectiveFromUser(messages: RawMessage[]): string {
   const candidates = messages
     .filter((m) => m.role === "user")
-    .filter((m) => m.content.trim().length >= 50)
+    .filter((m) => m.content.trim().length >= 20)
+    // Never use messages that are pure noise
+    .filter((m) => !isGlobalNoise(m.content.trim()))
 
   if (candidates.length === 0) {
-    // Ultra-fallback: any user message
-    const any = messages.find((m) => m.role === "user")
+    // Ultra-fallback: any non-noise user message
+    const any = messages.find((m) => m.role === "user" && !isGlobalNoise(m.content.trim()))
     if (any) return any.content.replace(/\n+/g, " ").trim().slice(0, 400)
     return "Project goal not explicitly stated — infer from conversation context."
   }
 
-  // Primary: longest user message (usually the task description)
+  // Prefer messages with task verbs and length >= 50
+  const taskOriented = candidates
+    .filter((m) => m.content.length >= 50 && TASK_VERB_RE.test(m.content))
+  
+  if (taskOriented.length > 0) {
+    // Longest task-oriented user message
+    const best = taskOriented.sort((a, b) => b.content.length - a.content.length)[0]
+    const text = best.content.replace(/\n+/g, " ").replace(/\s+/g, " ").trim()
+    return text.length > 500 ? text.slice(0, 500) + "…" : text
+  }
+
+  // Fallback: longest user message overall
   const byLength = [...candidates].sort((a, b) => b.content.length - a.content.length)
   const primary = byLength[0]
   const text = primary.content.replace(/\n+/g, " ").replace(/\s+/g, " ").trim()
@@ -123,9 +145,9 @@ export function extractObjectiveFromUser(messages: RawMessage[]): string {
 
 // ─── 3. PLANNING CHATTER REMOVAL ──────────────────────────────────────────────
 // Filter assistant sentences that announce FUTURE actions.
-// These should NEVER enter progress or accomplishment extraction.
+// These should NEVER enter progress, next steps, or accomplishment extraction.
 
-const PLANNING_PATTERNS: RegExp[] = [
+export const PLANNING_PATTERNS: RegExp[] = [
   /^let me\b/i,
   /^now i('ll| will)\b/i,
   /^i('ll| will) now\b/i,
@@ -139,6 +161,12 @@ const PLANNING_PATTERNS: RegExp[] = [
   /^what i('ll| will) do\b/i,
   /^here's what i('ll| will| am going to)\b/i,
   /^the (approach|plan|strategy|steps?) (is|are|will be)\b/i,
+  // Additional planning signals from the spec
+  /^let me present\b/i,
+  /^let me write\b/i,
+  /^now i have\b/i,
+  /^i will (now|next|then)\b/i,
+  /^going to\b/i,
 ]
 
 export function isPlanning(sentence: string): boolean {

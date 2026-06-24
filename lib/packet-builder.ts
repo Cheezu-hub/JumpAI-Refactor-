@@ -226,6 +226,8 @@ function extractKnownConstraints(msgs: ClassifiedMessage[]): string {
 }
 
 // ─── Next Immediate Action ────────────────────────────────────────────────────
+// NEVER copy assistant planning sentences ("Let me...", "Now I'll...").
+// Filter all candidate sentences through isPlanning() and isGlobalNoise() guards.
 
 function extractNextAction(msgs: ClassifiedMessage[]): string {
   // First check for TODOs
@@ -250,17 +252,33 @@ function extractNextAction(msgs: ClassifiedMessage[]): string {
   for (const pat of nextStepPatterns) {
     pat.lastIndex = 0
     const match = pat.exec(lastMsg)
-    if (match) return capitalize(match[0].trim().replace(/[.]+$/, "")) + "."
+    if (match) {
+      const candidate = match[0].trim().replace(/[.]+$/, "")
+      // Never use planning chatter or noise as a next step
+      if (!isPlanning(candidate) && !isGlobalNoise(candidate)) {
+        return capitalize(candidate) + "."
+      }
+    }
   }
 
-  // Last resort: final sentences of last assistant message
+  // Last resort: find the last non-planning, non-noise sentence from the assistant.
+  // NEVER use raw planning sentences like "Let me present the completed file."
   const sentences = lastMsg
     .split(/(?<=[.!?])\s+/)
     .filter((s) => s.trim().length > 25)
+    .filter((s) => !isPlanning(s.trim()))
+    .filter((s) => !isGlobalNoise(s.trim()))
+
   const last = sentences[sentences.length - 1]?.trim()
-  return last && last.length < 500
-    ? last
-    : "Continue from the last point — review the final assistant message."
+  if (last && last.length < 500) return last
+
+  // All assistant sentences were planning chatter — infer from workflow context
+  const blockerMsgs = msgs.filter((m) => m.category === "blocker" || m.category === "error")
+  if (blockerMsgs.length > 0) {
+    return "Resolve the current blocker and continue implementation."
+  }
+
+  return "Continue from the last completed step — review the transcript below."
 }
 
 // ─── Recent Conversation Transcript ───────────────────────────────────────────
