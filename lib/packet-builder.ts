@@ -420,20 +420,58 @@ export async function buildContinuationPacket(
   await new Promise(r => setTimeout(r, 0))
 
   // 4. Build packet sections — objective uses user-only clean messages
-  console.time("[JumpAI] packet:sections")
+  console.time("[JumpAI] section:objective")
+  const objective = extractObjective(kept.length > 0 ? kept : classified, cleanRaw)
+  console.timeEnd("[JumpAI] section:objective")
+
+  console.time("[JumpAI] section:status")
+  const currentImplementationStatus = mode === "compact" ? "" : extractImplementationStatus(kept)
+  console.timeEnd("[JumpAI] section:status")
+
+  console.time("[JumpAI] section:debug")
+  const activeDebuggingContext = extractDebuggingContext(kept)
+  console.timeEnd("[JumpAI] section:debug")
+
+  console.time("[JumpAI] section:architecture")
+  const importantArchitectureDecisions = mode === "compact" ? "" : extractArchitectureDecisions(kept)
+  console.timeEnd("[JumpAI] section:architecture")
+
+  console.time("[JumpAI] section:files")
+  const filesAndComponents = extractFilesAndComponents(kept.length > 0 ? kept : classified)
+  console.timeEnd("[JumpAI] section:files")
+
+  console.time("[JumpAI] section:failures")
+  const recentFailures = mode === "compact" ? "" : extractRecentFailures(kept)
+  console.timeEnd("[JumpAI] section:failures")
+
+  console.time("[JumpAI] section:fixes")
+  const attemptedFixes = mode === "compact" ? "" : extractAttemptedFixes(kept)
+  console.timeEnd("[JumpAI] section:fixes")
+
+  console.time("[JumpAI] section:constraints")
+  const knownConstraints = mode === "compact" ? "" : extractKnownConstraints(kept.length > 0 ? kept : classified)
+  console.timeEnd("[JumpAI] section:constraints")
+
+  console.time("[JumpAI] section:nextAction")
+  const nextImmediateAction = extractNextAction(kept.length > 0 ? kept : classified)
+  console.timeEnd("[JumpAI] section:nextAction")
+
+  console.time("[JumpAI] section:transcript")
+  const conversationTranscript = extractConversationTranscript(kept, mode)
+  console.timeEnd("[JumpAI] section:transcript")
+
   const coreFields = {
-    objective:                    extractObjective(kept.length > 0 ? kept : classified, cleanRaw),
-    currentImplementationStatus:  mode === "compact" ? "" : extractImplementationStatus(kept),
-    activeDebuggingContext:       extractDebuggingContext(kept),
-    importantArchitectureDecisions: mode === "compact" ? "" : extractArchitectureDecisions(kept),
-    filesAndComponents:           extractFilesAndComponents(kept.length > 0 ? kept : classified),
-    recentFailures:               mode === "compact" ? "" : extractRecentFailures(kept),
-    attemptedFixes:               mode === "compact" ? "" : extractAttemptedFixes(kept),
-    knownConstraints:             mode === "compact" ? "" : extractKnownConstraints(kept.length > 0 ? kept : classified),
-    nextImmediateAction:          extractNextAction(kept.length > 0 ? kept : classified),
-    conversationTranscript:       extractConversationTranscript(kept, mode)
+    objective,
+    currentImplementationStatus,
+    activeDebuggingContext,
+    importantArchitectureDecisions,
+    filesAndComponents,
+    recentFailures,
+    attemptedFixes,
+    knownConstraints,
+    nextImmediateAction,
+    conversationTranscript
   }
-  console.timeEnd("[JumpAI] packet:sections")
 
   // 5. Score the packet
   console.time("[JumpAI] packet:score")
