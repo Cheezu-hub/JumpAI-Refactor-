@@ -4,6 +4,12 @@ import { compressMessages, estimateTokens } from "./compression"
 import type { ExtractedMessage } from "./extractor"
 import { toExtractedMessages } from "./extractor"
 import type { RawMessage } from "./extractor"
+import {
+  extractObjectiveFromUser,
+  removePlanningChatter,
+  isGlobalNoise,
+  filterNoiseMessages,
+} from "./workflow-engine"
 
 // ─── Pattern Libraries ────────────────────────────────────────────────────────
 
@@ -11,30 +17,34 @@ const FILE_PATTERN = /\b[\w./\-]+\.(?:tsx|ts|jsx|js|py|rs|go|java|kt|swift|rb|ph
 const COMPONENT_PATTERN = /(?:(?:<|\/\/\s*component[:\s]|interface\s+|type\s+|class\s+|function\s+|const\s+|def\s+|fn\s+)([A-Z]\w+))/g
 const VERSION_PATTERN = /v?\d+\.\d+(?:\.\d+)?(?:-[\w.]+)?/g
 
-// ─── Objective Extractor ──────────────────────────────────────────────────────
+// ─── Objective Extractor ────────────────────────────────────────────────────────────
+// Delegates to workflow-engine — user messages only, length-sorted.
+// Never uses assistant messages (which can contaminate with AI disclaimers).
 
-function extractObjective(msgs: ClassifiedMessage[]): string {
+function extractObjective(msgs: ClassifiedMessage[], rawMsgs?: RawMessage[]): string {
+  // If we have raw messages, use the user-only extractor from workflow-engine
+  if (rawMsgs && rawMsgs.length > 0) {
+    return extractObjectiveFromUser(rawMsgs)
+  }
+  // Fallback for classified-only path: user goal messages only
   const goals = msgs.filter((m) => m.category === "goal" && m.role === "user")
   if (goals.length > 0) {
-    // Use the first user goal statement
-    const text = goals[0].content
-      .replace(/\n+/g, " ")
-      .replace(/\s+/g, " ")
-      .trim()
+    const text = goals[0].content.replace(/\n+/g, " ").replace(/\s+/g, " ").trim()
     return text.length > 500 ? text.slice(0, 500) + "…" : text
   }
-
-  // Fallback: first user message
-  const firstUser = msgs.find((m) => m.role === "user")
-  if (firstUser) {
-    const text = firstUser.content.replace(/\n+/g, " ").replace(/\s+/g, " ").trim()
+  // Fallback: longest user message
+  const userMsgs = msgs.filter((m) => m.role === "user" && m.content.length >= 50)
+  if (userMsgs.length > 0) {
+    const best = userMsgs.sort((a, b) => b.content.length - a.content.length)[0]
+    const text = best.content.replace(/\n+/g, " ").replace(/\s+/g, " ").trim()
     return text.length > 400 ? text.slice(0, 400) + "…" : text
   }
-
   return "Not explicitly stated — infer from conversation context."
 }
 
 // ─── Implementation Status ────────────────────────────────────────────────────
+// Planning chatter is stripped before extracting bullets.
+// "Let me...", "Now I'll...", "I'm going to..." sentences are removed first.
 
 function extractImplementationStatus(msgs: ClassifiedMessage[]): string {
   const impls = msgs.filter(
@@ -44,24 +54,28 @@ function extractImplementationStatus(msgs: ClassifiedMessage[]): string {
   if (impls.length === 0) return "No implementation progress recorded."
 
   const lastImpl = impls[impls.length - 1]
-  const items: string[] = []
 
-  // Extract bullet points from implementation messages
-  const bullets = lastImpl.content.match(/^[\s]*[-*•]\s+.{10,200}$/gm) || []
-  const numbered = lastImpl.content.match(/^[\s]*\d+\.\s+.{10,200}$/gm) || []
+  // Strip planning chatter before scanning for bullet points
+  const cleanedContent = removePlanningChatter(lastImpl.content)
+
+  const items: string[] = []
+  const bullets = cleanedContent.match(/^[\s]*[-*•]\s+.{10,200}$/gm) || []
+  const numbered = cleanedContent.match(/^[\s]*\d+\.\s+.{10,200}$/gm) || []
 
   ;[...bullets, ...numbered].slice(0, 6).forEach((b) => {
-    items.push(b.trim().replace(/^[-*•\d.]+\s+/, ""))
+    const text = b.trim().replace(/^[-*•\d.]+\s+/, "")
+    // Skip any item that is still planning chatter or global noise
+    if (!isGlobalNoise(text)) items.push(text)
   })
 
   if (items.length > 0) {
     return items.map((i) => `• ${capitalize(i)}`).join("\n")
   }
 
-  // Fallback: last meaningful sentences from last assistant impl message
-  const sentences = lastImpl.content
+  // Fallback: last meaningful non-planning sentences
+  const sentences = cleanedContent
     .split(/(?<=[.!?])\s+/)
-    .filter((s) => s.trim().length > 30)
+    .filter((s) => s.trim().length > 30 && !isGlobalNoise(s))
     .slice(0, 3)
 
   return sentences.join(" ") || "See conversation for implementation details."
@@ -365,6 +379,9 @@ export async function buildContinuationPacket(
   const messages = toExtractedMessages(rawMessages)
   console.timeEnd("[JumpAI] packet:toExtracted")
 
+  // Apply workflow-engine noise gate to raw messages before objective extraction
+  const cleanRaw = filterNoiseMessages(rawMessages)
+
   // Yield to UI thread between heavy steps
   await new Promise(r => setTimeout(r, 0))
 
@@ -384,10 +401,10 @@ export async function buildContinuationPacket(
   // Yield to UI thread
   await new Promise(r => setTimeout(r, 0))
 
-  // 4. Build packet sections from kept messages
+  // 4. Build packet sections — objective uses user-only clean messages
   console.time("[JumpAI] packet:sections")
   const coreFields = {
-    objective:                    extractObjective(kept.length > 0 ? kept : classified),
+    objective:                    extractObjective(kept.length > 0 ? kept : classified, cleanRaw),
     currentImplementationStatus:  mode === "compact" ? "" : extractImplementationStatus(kept),
     activeDebuggingContext:       extractDebuggingContext(kept),
     importantArchitectureDecisions: mode === "compact" ? "" : extractArchitectureDecisions(kept),
@@ -498,7 +515,7 @@ export function formatPacketForPlatform(
     ? `> ⚠ ${packet.score.warnings.join(" | ")}\n\n`
     : ""
 
-  add("Current Objective", packet.objective)
+  add("Current Project", packet.objective)
   add("Current Progress", packet.currentImplementationStatus)
   add("Architecture Decisions", packet.importantArchitectureDecisions)
   add("Active Errors / Blockers", packet.activeDebuggingContext)

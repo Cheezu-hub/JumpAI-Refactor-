@@ -10,77 +10,34 @@
  */
 
 import type { RawMessage } from "./extractor"
+import {
+  filterNoiseMessages,
+  extractObjectiveFromUser,
+  extractAccomplishments,
+  detectCurrentBlocker,
+} from "./workflow-engine"
 
-// ─── PRIORITY 1: NOISE GATE ───────────────────────────────────────────────────
-// Filter sidebar junk, upgrade prompts, UI chrome and artifact labels
-// BEFORE any processing. This is the single highest-impact improvement.
+// ─── NOISE GATE ───────────────────────────────────────────────────────────────
+// Delegated entirely to workflow-engine.ts (filterNoiseMessages).
+// isRecoveryNoise is kept as a local alias for legacy code paths below.
 
-// ─── NOISE GATE CONFIGURATION ────────────────────────────────────────────────
-// Patterns to filter out during extraction to ensure zero-clutter continuity
-
-const NOISE_UI_LABELS = new Set([
-  "free plan", "pro plan", "team plan", "enterprise plan",
-  "upgrade", "upgrade to pro", "upgrade now", "upgrade plan",
-  "new chat", "new conversation", "start new chat",
-  "recent conversations", "starred conversations",
-  "search conversations", "search chats",
-  "settings", "sign out", "sign in", "log in", "log out",
-  "keyboard shortcuts", "shortcuts",
-  "projects", "recents", "starred",
-  "copy", "edit", "retry", "regenerate", "stop generating",
-  "like", "dislike", "thumbs up", "thumbs down",
-  "share", "export", "model:", "switch model",
-  "back", "close", "cancel", "help", "feedback",
-  "send message", "message claude", "message chatgpt",
-  "claude.ai", "anthropic", "openai", "google", "gemini",
-  "artifacts", "artifact", "preview", "code", "run",
-  "copy code", "download", "open in new tab", "publish",
-])
-
-const NOISE_REGEX_PATTERNS: RegExp[] = [
-  /^[\d,]+\s*tokens?$/i,
-  /^\d+:\d+\s*(am|pm)?$/i,
-  /^(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\s+\d+/i,
-  /^\d+\s*\/\s*\d+$/,
-  /^today$|^yesterday$/i,
-  /^\$\d+\s*\/\s*(month|mo|yr|year)/i,
-  /^[A-Z\s]{2,30}$/, // all-caps UI labels
-  /^\s*[-–—]{2,}\s*$/, // separator lines
-  /^(ctrl|cmd|alt|shift|tab|esc|enter|space)\s*[+:]/i, // keyboard shortcuts
-  /^\[\d+\]\s*$/, // bare footnote refs
-  /^[0-9]+$/, // bare numbers
-  /^(step|part)\s+\d+$/i, // bare step indicators without content
-]
+const UI_CHROME_RE = /^(Copy|Edit|Retry|Regenerate|Like|Dislike|Share|Export|Help|Feedback|Publish|Artifacts?|Preview|Run|Download|Code)\s*$/gim
+const SEPARATOR_RE = /^\s*[-–—]{3,}\s*$/gm
 
 function isRecoveryNoise(text: string): boolean {
   const t = text.trim()
   if (t.length < 3) return true
   const lo = t.toLowerCase()
-  if (NOISE_UI_LABELS.has(lo)) return true
-  if (NOISE_REGEX_PATTERNS.some(r => r.test(t))) return true
-  // Short all-caps or all-numeric with no real content
+  const UI_LABELS = new Set([
+    "free plan", "pro plan", "upgrade", "new chat", "new conversation",
+    "projects", "share", "artifacts", "artifact", "copy code", "download",
+    "sign out", "log in", "settings", "keyboard shortcuts",
+  ])
+  if (UI_LABELS.has(lo)) return true
+  if (/^[\d,]+\s*tokens?$/i.test(t)) return true
+  if (/^\d+:\d+\s*(am|pm)?$/i.test(t)) return true
   if (t.length < 40 && /^[A-Z0-9\s.,!?]+$/.test(t) && t.split(" ").length < 4) return true
   return false
-}
-
-const UI_CHROME_RE = /^(Copy|Edit|Retry|Regenerate|Like|Dislike|Share|Export|Help|Feedback|Publish|Artifacts?|Preview|Run|Download|Code)\s*$/gim
-const SEPARATOR_RE = /^\s*[-–—]{3,}\s*$/gm
-
-function filterMessages(messages: RawMessage[]): RawMessage[] {
-  const clean: RawMessage[] = []
-  for (const m of messages) {
-    if (isRecoveryNoise(m.content)) continue
-    
-    const content = m.content
-      .replace(UI_CHROME_RE, "")
-      .replace(SEPARATOR_RE, "")
-      .trim()
-      
-    if (content.length > 5) {
-      clean.push({ ...m, content })
-    }
-  }
-  return clean
 }
 
 // ─── Public Types ─────────────────────────────────────────────────────────────
@@ -549,72 +506,57 @@ function reconstructWorkflowState(messages: RawMessage[], fileMap: Map<string, I
   const recent = messages.slice(-8)
   const allRecent = recent.map(m => m.content.slice(0, 800)).join("\n")
 
-  // Completed work
+  // ── Completed work — delegated to workflow-engine (planning-chatter-free)
   const completedWork = extractAccomplishments(messages)
 
-  // Blocker Extraction (includes interruption)
-  let currentBlocker: string | undefined
-  const im = INTERRUPTION_RE.exec(allRecent)
-  if (im) {
-    currentBlocker = "Generation interrupted: " + im[0].trim().slice(0, 150)
-  } else {
-    const bm = BLOCKER_RE.exec(allRecent)
-    if (bm) currentBlocker = bm[0].trim().slice(0, 250)
-  }
-  INTERRUPTION_RE.lastIndex = 0
-  BLOCKER_RE.lastIndex = 0
+  // ── Blocker detection — delegated to workflow-engine (expanded patterns)
+  const currentBlocker = detectCurrentBlocker(messages)
 
-  // Likely affected area
+  // ── Likely affected area — from file map
   let likelyAffectedArea: string | undefined
   if (fileMap.size > 0) {
-    // Just pick the most confidently inferred recent file
     const files = [...fileMap.values()]
     likelyAffectedArea = files.find(f => f.confidence === "high")?.path || files[0].path
   }
 
-  // Next Step inference
+  // ── Next step inference
   let nextImmediateStep: string | undefined
-  if (currentBlocker?.includes("interrupted")) {
-    nextImmediateStep = "Resume the interrupted generation and complete the implementation."
+  if (currentBlocker && /interrupted|cut.?off|max.?length|context.?limit/i.test(currentBlocker)) {
+    nextImmediateStep = "Resume the interrupted generation and deliver the complete output."
+  } else if (currentBlocker && /error|failed|crash|exception/i.test(currentBlocker)) {
+    nextImmediateStep = "Resolve the error and verify the fix before continuing."
   } else if (currentBlocker) {
-    nextImmediateStep = "Resolve the current blocker and verify the fix."
+    nextImmediateStep = "Resolve the current blocker and continue implementation."
   } else {
     nextImmediateStep = "Continue implementing the pending tasks."
   }
 
-  // Unresolved issues
+  // ── Unresolved issues from recent text
   const unresolvedIssues: string[] = []
   const ERROR_BRIEF_RE = /(?:TypeError|SyntaxError|Error|failed|cannot\s+resolve|ENOENT|WARN)\b.{0,120}/gi
   let em: RegExpExecArray | null
-  const seen = new Set<string>()
+  const seenIssues = new Set<string>()
   while ((em = ERROR_BRIEF_RE.exec(allRecent)) !== null) {
     const t = em[0].trim().slice(0, 150)
-    if (!seen.has(t)) { seen.add(t); unresolvedIssues.push(t) }
+    if (!seenIssues.has(t)) { seenIssues.add(t); unresolvedIssues.push(t) }
     if (unresolvedIssues.length >= 4) break
   }
 
-  return { 
-    completedWork, 
-    currentBlocker, 
-    unresolvedIssues: deduplicateSemantically(unresolvedIssues), 
-    likelyAffectedArea, 
-    nextImmediateStep 
+  return {
+    completedWork,
+    currentBlocker,
+    unresolvedIssues: deduplicateSemantically(unresolvedIssues),
+    likelyAffectedArea,
+    nextImmediateStep
   }
 }
 
 // ─── PROJECT GOAL EXTRACTION ──────────────────────────────────────────────────
+// Delegated to workflow-engine.ts (extractObjectiveFromUser — user-only, length-sorted).
+// This local wrapper keeps the existing call-site in runRecoveryEngine unchanged.
 
 function extractProjectGoal(messages: RawMessage[]): string {
-  const GOAL_RE = /(?:i(?:'m|\s+am)\s+(?:building|creating|making|working\s+on)|we(?:'re|\s+are)\s+(?:building|creating)|the\s+goal\s+is\s+(?:to\s+)?|let(?:'s|us)\s+build)\s+(.{20,400})/i
-  for (const msg of messages.slice(0, 8)) {
-    if (msg.role !== "user") continue
-    const m = GOAL_RE.exec(msg.content)
-    if (m) return m[1].trim().replace(/\n+/g, " ").slice(0, 400)
-  }
-  // Fallback: first user message
-  const first = messages.find(m => m.role === "user")
-  if (first) return first.content.replace(/\n+/g, " ").trim().slice(0, 400)
-  return "Project goal not explicitly stated — infer from conversation context."
+  return extractObjectiveFromUser(messages)
 }
 
 // ─── RECENT TRANSCRIPT ────────────────────────────────────────────────────────
@@ -653,8 +595,8 @@ export function runRecoveryEngine(messages: RawMessage[]): RecoveryEngineResult 
     }
   }
 
-  // PRIORITY 1: Filter noise FIRST before any processing
-  const clean = filterMessages(messages)
+  // Stage 1: Filter noise FIRST using the new workflow-engine noise gate
+  const clean = filterNoiseMessages(messages)
 
   // ── 1. Code Block Recovery ─────────────────────────────────────────────────
   const codeBlocks: RecoveredCodeBlock[] = []
