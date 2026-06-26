@@ -447,6 +447,60 @@ function deduplicateSemantically(strings: string[], threshold = 0.45): string[] 
   return result
 }
 
+// PRIORITY 2: Accomplishment extraction
+// Extract WHAT WAS DONE, not just what was said.
+// Looks for completion signals: "I've created", "I've implemented", "X is now working"
+
+const ACCOMPLISHMENT_PATTERNS: RegExp[] = [
+  /i(?:'ve|\s+have)\s+(?:created|built|implemented|added|set\s+up|configured|written|updated|fixed|completed|finished|set\s+up)\s+(?:the\s+)?(.{10,180})/gi,
+  /(?:the\s+)?(.{5,100})\s+is\s+now\s+(?:working|complete|done|implemented|ready|functional)/gi,
+  /(?:successfully|just)\s+(?:created|built|implemented|added|fixed|updated)\s+(?:the\s+)?(.{10,150})/gi,
+  /(?:here(?:'s|\s+is)\s+the\s+(?:completed?|implemented|final|updated))\s+(.{5,120})/gi,
+]
+
+function extractAccomplishments(messages: RawMessage[]): string[] {
+  const results: string[] = []
+  const seen = new Set<string>()
+
+  // Only look at assistant messages, biased toward recent ones
+  const assistantMsgs = messages
+    .filter(m => m.role === "assistant")
+    .slice(-8) // last 8 assistant messages
+    .reverse() // most recent first
+
+  for (const msg of assistantMsgs) {
+    const text = msg.content.slice(0, 2000)
+    for (const pat of ACCOMPLISHMENT_PATTERNS) {
+      pat.lastIndex = 0
+      let m: RegExpExecArray | null
+      while ((m = pat.exec(text)) !== null) {
+        const desc = (m[1] || m[0]).trim().replace(/\s+/g, " ").slice(0, 160)
+        if (desc.length > 8 && !seen.has(desc) && !isRecoveryNoise(desc)) {
+          seen.add(desc)
+          results.push(desc)
+        }
+        if (results.length >= 6) break
+      }
+      if (results.length >= 6) break
+    }
+    if (results.length >= 6) break
+  }
+
+  // Fallback if no accomplishment signals found
+  if (results.length === 0) {
+    for (const msg of assistantMsgs.slice(0, 4)) {
+      const sentences = msg.content
+        .split(/(?<=[.!?])\s+/)
+        .filter(s => s.trim().length > 40 && !isRecoveryNoise(s))
+      if (sentences[0]) {
+        const t = sentences[0].trim().slice(0, 180)
+        if (!seen.has(t)) { seen.add(t); results.push(t) }
+      }
+    }
+  }
+
+  return deduplicateSemantically(results)
+}
 
 function reconstructWorkflowState(messages: RawMessage[], fileMap: Map<string, InferredFile>): WorkflowState {
   const recent = messages.slice(-8)
